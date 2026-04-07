@@ -16,6 +16,8 @@ class CodeAgentState(TypedDict):
     human_feedback_of_code: str
     implementation_summary: NotRequired[str]
     implementation_files: NotRequired[list[str]]
+    implementation_validation: NotRequired[str]
+    implementation_typecheck_passed: NotRequired[bool]
 
 class PlannerResponse(BaseModel):
     repo_context: str
@@ -34,3 +36,12 @@ class ReviewPlanResponse(BaseModel):
 class ImplementationSummaryResponse(BaseModel):
     summary: str
     files_touched: list[str] = Field(default_factory=list)
+
+
+class ImplementationValidationResponse(BaseModel):
+    """Interpretation of npm self-check output (filled after the coding agent run)."""
+
+    summary: str
+    typecheck_passed_final: bool = Field(
+        description="True if the last `npm run typecheck` in the transcript exited with code 0."
+    )

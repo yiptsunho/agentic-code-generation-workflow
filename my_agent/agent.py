@@ -1,19 +1,35 @@
-from dataclasses import dataclass
-from typing import Any, Dict
-
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.constants import START, END
 from langgraph.graph import StateGraph
 
-from my_agent.utils.nodes import plan, parse_specifications, review_plan, should_start_implement, implement
+from my_agent.utils.nodes import (
+    implement_app,
+    implement_tests,
+    plan,
+    parse_specifications,
+    review_plan,
+    should_continue_to_tests,
+    should_finish_implementation,
+    should_start_implement,
+)
 from my_agent.utils.state import CodeAgentState
 
 memory = MemorySaver()
 
 implementation_subgraph = StateGraph(CodeAgentState)
-implementation_subgraph.add_node("implement", implement)
-implementation_subgraph.add_edge(START, "implement")
-implementation_subgraph.add_edge("implement", END)
+implementation_subgraph.add_node("implement_app", implement_app)
+implementation_subgraph.add_node("implement_tests", implement_tests)
+implementation_subgraph.add_edge(START, "implement_app")
+implementation_subgraph.add_conditional_edges(
+    "implement_app",
+    should_continue_to_tests,
+    ["implement_app", "implement_tests"],
+)
+implementation_subgraph.add_conditional_edges(
+    "implement_tests",
+    should_finish_implementation,
+    ["implement_tests", END],
+)
 compiled_implementation_subgraph = implementation_subgraph.compile()
 
 main_graph = StateGraph(CodeAgentState)

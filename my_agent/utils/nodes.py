@@ -1,14 +1,13 @@
 from pathlib import Path
+import re
 from typing import Sequence
 
-from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ToolCallLimitMiddleware,
 )
 from langchain_community.agent_toolkits import FileManagementToolkit
-from langchain_community.tools import ShellTool
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -22,11 +21,12 @@ from my_agent.utils.state import (
     CodeAgentState,
     DetailedSpecifications,
     ImplementationSummaryResponse,
+    ImplementationValidationResponse,
     PlannerResponse,
     ReviewPlanResponse,
 )
 from langchain_skills import SkillTool
-from my_agent.utils.tools import load_project_skills_markdown, load_skill
+from my_agent.utils.tools import load_skill, run_frontend_npm
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
@@ -56,7 +56,7 @@ If there is no previous plan section (first draft), produce a complete plan from
 
 Rules:
 - repo_context: concise notes grounded in what the transcript shows (paths read, patterns, styling).
-- design, approach, task: concrete plan for implementing the specifications.
+- design, approach, task: concrete plan for implementing the specifications. Only need to write tests for components.
 - Do not invent file contents or paths that are not supported by the transcript.
 """
 
@@ -86,36 +86,51 @@ Output (structured):
   - If plan_approved is true: a brief confirmation (2–4 sentences). Optional minor suggestions are fine; keep approval true unless something is truly blocking.
 """
 
-
-
-
 EXPLORE_RUN_TOOL_LIMIT = 12
 EXPLORE_MODEL_CALL_LIMIT = 22
 EXPLORER_RECURSION_LIMIT = 120
 
-IMPLEMENT_RUN_TOOL_LIMIT = 40
-IMPLEMENT_MODEL_CALL_LIMIT = 32
-IMPLEMENT_RECURSION_LIMIT = 180
+IMPLEMENT_RUN_TOOL_LIMIT = 100
+IMPLEMENT_MODEL_CALL_LIMIT = 100
+IMPLEMENT_RECURSION_LIMIT = 220
 
-implement_system_prompt = """You are an expert software engineer implementing changes in a frontend repository.
-You can use the provided tools to read, write, copy, move and list. You can also use the provided skills.
+implement_system_prompt = """Implement frontend tasks with high signal and minimal turns.
 
-The user message may include a **Project skills** section with markdown guidance (stack, patterns, testing, etc.). Treat it as authoritative for conventions and tooling when it does not conflict with the detailed specifications or the task checklist.
+Core constraints:
+- Follow detailed specs + design + approach + ordered task checklist + project skills.
+- Keep edits focused; avoid unrelated refactors.
+- Use `src/main.tsx` and `src/App.tsx` as entry points unless asked otherwise.
+- Only use dependencies already in `package.json` unless explicitly asked to add new ones.
+- Do not edit files in `src/mocks`.
+- When writing tests files, explicitly import { describe, it, expect } from "vitest"
 
-Goals:
-- Follow the detailed specifications, design, approach, the ordered task checklist, and the project skills.
-- Prefer reading existing files before editing; align with patterns and styles you find.
-- Complete every item in the task checklist before you stop. If something is truly blocked, explain it clearly in your final assistant message.
+Tool usage:
+- Batch same-kind tool calls in one turn whenever possible (group `list_directory`, then grouped reads, then grouped writes).
+- Prefer `file_search` and targeted reads over repeatedly listing directories.
+- If multiple files need edits, complete them in one pass before validation.
+- Do not call `list_directory` (or other file-browsing tools) on `node_modules` or any path under it.
 
-Rules:
-- Make focused edits; do not refactor unrelated code or delete code unless a task requires it.
-- Paths are relative to the repository root exposed to the tools.
-- You may call `load_skill` with a skill folder name (e.g. `frontend-tech-stack`) if you need to re-read a skill; the same content is usually already inlined under Project skills.
-- Self-validate before finishing. Run `npm install`, then `npm run typecheck`, then `npm run dev`.
-- Treat typecheck/dev output as a quality gate. If errors appear, fix the code and re-run validation until there are no blocking errors.
-- For shell operations, use only `npm install`, `npm run dev` and `npm run typecheck` in the `frontend/` folder.
-- When you are finished, send one final assistant message that briefly states what you implemented and which files you changed. That final message must not include tool calls.
-- The GraphQL API, Apollo Client, and MSW are already configured and ready to use.
+Validation and fix loop (mandatory):
+1) Run `run_frontend_npm("npm install")`, then `run_frontend_npm("npm run typecheck")`.
+2) After each result, briefly interpret `exit_code` and key log lines.
+3) If typecheck fails, treat diagnostics as source of truth and fix them before anything else:
+   - Extract failing file/code/message.
+   - Edit only implicated files (+ directly related config/setup) first.
+   - Re-run `npm run typecheck`, compare with previous errors, and continue until clean.
+   - Switch strategy if errors are unchanged after 2 iterations.
+4) Heuristics:
+   - TS6133 unused React in TSX: remove unused default `React` import when not referenced.
+   - Missing `describe`/`it`/`expect` in `*.test.tsx`: first add explicit imports at the top of each failing test file:
+     `import { describe, it, expect } from "vitest"`.
+     If errors persist across many test files, then fix test typing globally via Vitest types config. Do not add Jest types or `@jest/globals` in this repo.
+5) `npm run dev` may timeout (Vite is long-running); use startup logs to judge success.
+
+Do not stop with a failure report only. Finish with one assistant message (no tool calls) including:
+- checklist status
+- files changed
+- final typecheck result (must be clean unless truly blocked)
+- dev sanity check
+- remaining risks/blockers (if any).
 """
 
 def parse_specifications(state: CodeAgentState):
@@ -154,7 +169,11 @@ repo_explorer = create_agent(
 )
 
 
-def _format_exploration_transcript(messages: Sequence[BaseMessage]) -> str:
+def _format_exploration_transcript(
+    messages: Sequence[BaseMessage],
+    *,
+    tool_body_limit: int = 4000,
+) -> str:
     """Compress agent message list into text for the final structured planner."""
     parts: list[str] = []
     for m in messages:
@@ -168,8 +187,8 @@ def _format_exploration_transcript(messages: Sequence[BaseMessage]) -> str:
                 parts.append(f"Assistant:\n{m.content}")
         elif isinstance(m, ToolMessage):
             body = m.content
-            if len(body) > 4000:
-                body = body[:4000] + "\n... [truncated]"
+            if len(body) > tool_body_limit:
+                body = body[:tool_body_limit] + "\n... [truncated]"
             parts.append(f"Tool {m.name}:\n{body}")
     return "\n\n---\n\n".join(parts)
 
@@ -291,6 +310,18 @@ def should_start_implement(state: CodeAgentState):
 
     return "plan"
 
+
+def should_continue_to_tests(state: CodeAgentState):
+    if state.get("implementation_typecheck_passed", False):
+        return "implement_tests"
+    return "implement_app"
+
+
+def should_finish_implementation(state: CodeAgentState):
+    if state.get("implementation_typecheck_passed", False):
+        return "done"
+    return "implement_tests"
+
 implement_tool_kit = FileManagementToolkit(
     root_dir=str(Path("./frontend").resolve()),
     selected_tools=["copy_file", "file_search", "move_file", "write_file", "read_file", "list_directory"],
@@ -308,44 +339,69 @@ implement_middleware = [
 ]
 
 skill_tool = SkillTool(directories="./skills")
-shell_tool = ShellTool()
 
-implement_tools = implement_tool_kit + [skill_tool, load_skill, shell_tool]
+implement_tools = implement_tool_kit + [load_skill, run_frontend_npm]
 
-# repo_coder = create_agent(
-#     model="gpt-4o-mini",
-#     tools=implement_tools,
-#     system_prompt=implement_system_prompt,
-#     middleware=implement_middleware,
-# )
-
-repo_coder = create_deep_agent(
-    model="gpt-4o-mini",
+repo_coder = create_agent(
+    model="gpt-5.4-mini",
     tools=implement_tools,
     system_prompt=implement_system_prompt,
     middleware=implement_middleware,
 )
 
-def implement(state: CodeAgentState):
+
+def _split_tasks(task: list[str]) -> tuple[list[str], list[str]]:
+    """Split plan tasks into app tasks and test tasks."""
+    test_keywords = re.compile(r"\b(test|tests|testing|vitest|unit test|integration test)\b", re.IGNORECASE)
+    app_tasks: list[str] = []
+    test_tasks: list[str] = []
+    for item in task:
+        if test_keywords.search(item):
+            test_tasks.append(item)
+        else:
+            app_tasks.append(item)
+    return app_tasks, test_tasks
+
+
+def _run_implementation_phase(state: CodeAgentState, *, phase: str) -> dict:
     detailed_specifications = state["detailed_specifications"]
     repo_context = (state.get("repo_context") or "").strip()
     design = (state.get("design") or "").strip()
     approach = (state.get("approach") or "").strip()
-    task = state.get("task") or []
+    full_task = state.get("task") or []
     feedback_of_code = (state.get("feedback_of_code") or "").strip()
+    app_tasks, test_tasks = _split_tasks(full_task)
+    phase_task = app_tasks if phase == "app" else test_tasks
 
-    # skills_md = load_project_skills_markdown()
-    # skills_section = ""
-    # if skills_md:
-    #     skills_section = (
-    #         "## Project skills\n\n"
-    #         "Apply these conventions alongside the spec and task list:\n\n"
-    #         f"{skills_md}\n\n"
-    #     )
+    if phase == "app":
+        phase_header = (
+            "Phase: application implementation only (exclude writing/updating tests). "
+            "Do not create or edit test files in this phase.\n\n"
+        )
+        task_instructions = (
+            "Use only non-test tasks from the checklist below. "
+            "If a task mixes app+test work, do only the app portion now.\n\n"
+        )
+    else:
+        phase_header = (
+            "Phase: test implementation only. "
+            "Write/update tests for the already implemented features.\n\n"
+        )
+        task_instructions = (
+            "Use only test-related tasks from the checklist below. "
+            "Do not make unrelated feature changes in this phase.\n\n"
+        )
+
+    shown_tasks = phase_task if phase_task else full_task
 
     user_parts: list[str] = [
         "Implement the following in the repository.\n\n",
-        # skills_section,
+        phase_header,
+        "**Quality gate:** After coding, run `npm install` then `npm run typecheck` via `run_frontend_npm`. "
+        "If typecheck fails, fix the errors and re-run `npm run typecheck` until `exit_code` is 0. "
+        "Do not stop with only a description of failures — apply code changes until typecheck passes or you document a specific blocker after multiple fix attempts. "
+        "Work efficiently: batch file discovery/reads/writes so each iteration accomplishes substantial progress.\n\n",
+        task_instructions,
         "Detailed specifications:\n\n",
         detailed_specifications,
         "\n\nRepo context (from exploration):\n\n",
@@ -354,8 +410,8 @@ def implement(state: CodeAgentState):
         design or "(none)",
         "\n\nApproach:\n\n",
         approach or "(none)",
-        "\n\nTask checklist (complete all items in order):\n\n",
-        _format_task_list(task),
+        "\n\nTask checklist for this phase:\n\n",
+        _format_task_list(shown_tasks),
     ]
     if feedback_of_code:
         user_parts.append(
@@ -367,7 +423,10 @@ def implement(state: CodeAgentState):
         {"messages": [HumanMessage(content="".join(user_parts))]},
         config={"recursion_limit": IMPLEMENT_RECURSION_LIMIT},
     )
-    transcript = _format_exploration_transcript(coding["messages"])
+    transcript = _format_exploration_transcript(
+        coding["messages"],
+        tool_body_limit=20000,
+    )
 
     structured_llm = llm.with_structured_output(ImplementationSummaryResponse)
     summary_response = structured_llm.invoke(
@@ -383,7 +442,7 @@ def implement(state: CodeAgentState):
             HumanMessage(
                 content=(
                     "Task checklist:\n\n"
-                    f"{_format_task_list(task)}\n\n"
+                    f"{_format_task_list(shown_tasks)}\n\n"
                     "---\n\n"
                     "Agent transcript:\n\n"
                     f"{transcript}"
@@ -392,7 +451,41 @@ def implement(state: CodeAgentState):
         ]
     )
 
+    validation_llm = llm.with_structured_output(ImplementationValidationResponse)
+    validation_response = validation_llm.invoke(
+        [
+            SystemMessage(
+                content=(
+                    "You interpret npm self-check results from an agent transcript. "
+                    "Focus on ToolMessage content from `run_frontend_npm`. "
+                    "Determine **typecheck_passed_final** from the **last** "
+                    "`npm run typecheck` result in the transcript: true only if its "
+                    "exit_code is 0 (or output clearly shows success with no TS errors). "
+                    "For each of `npm install`, `npm run typecheck` (final state), and "
+                    "`npm run dev`, briefly state pass/fail and cite key log lines. "
+                    "If the agent described errors but the last typecheck still failed, "
+                    "say clearly that the run did **not** finish with a clean typecheck "
+                    "and list remaining diagnostics. "
+                    "Explain dev `exit_code -1`/timeout notes — expected for Vite. "
+                    "If no npm tools appear in the transcript, say so. "
+                    "Write a concise summary a human can trust without re-reading raw logs."
+                )
+            ),
+            HumanMessage(content=f"Transcript:\n\n{transcript}"),
+        ]
+    )
+
     return {
         "implementation_summary": summary_response.summary,
         "implementation_files": summary_response.files_touched,
+        "implementation_validation": validation_response.summary,
+        "implementation_typecheck_passed": validation_response.typecheck_passed_final,
     }
+
+
+def implement_app(state: CodeAgentState):
+    return _run_implementation_phase(state, phase="app")
+
+
+def implement_tests(state: CodeAgentState):
+    return _run_implementation_phase(state, phase="tests")
