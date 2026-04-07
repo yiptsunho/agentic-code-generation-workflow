@@ -24,7 +24,9 @@ from my_agent.utils.state import (
     ImplementationSummaryResponse,
     ImplementationValidationResponse,
     PlannerResponse,
-    ReviewPlanResponse, TestFailureRoutingResponse,
+    ReviewImplementationResponse,
+    ReviewPlanResponse,
+    TestFailureRoutingResponse,
 )
 from langchain_skills import SkillTool
 from my_agent.utils.tools import FRONTEND_ROOT, load_skill, read_vitest_report_output, run_frontend_npm
@@ -371,6 +373,7 @@ def _run_implementation_phase(state: CodeAgentState, *, phase: str) -> dict:
     approach = (state.get("approach") or "").strip()
     full_task = state.get("task") or []
     feedback_of_code = (state.get("feedback_of_code") or "").strip()
+    feedback_of_test_case = (state.get("feedback_of_test_case") or "").strip()
     test_output = (state.get("test_output") or "").strip()
     test_passed = state.get("test_passed")
     test_failure_category = (state.get("test_failure_category") or "").strip()
@@ -421,6 +424,11 @@ def _run_implementation_phase(state: CodeAgentState, *, phase: str) -> dict:
         user_parts.append(
             "\n\nPrior code review feedback to address in this pass:\n\n"
             f"{feedback_of_code}"
+        )
+    if phase == "tests" and feedback_of_test_case:
+        user_parts.append(
+            "\n\nPrior test-case review feedback to address in this pass:\n\n"
+            f"{feedback_of_test_case}"
         )
     if test_output:
         user_parts.append(
@@ -554,11 +562,100 @@ def run_test(state: CodeAgentState):
 
 def should_route_after_test(state: CodeAgentState):
     if state.get("test_passed", False):
-        return END
+        return "review_implementation"
 
     category = state.get("test_failure_category", "mixed_or_unclear")
     if category == "test_only":
         return "implement_tests"
 
     # app_logic or mixed_or_unclear => safer to fix app first
+    return "implement_app"
+
+def review_implementation(state: CodeAgentState):
+    detailed_specifications = state.get("detailed_specifications", "")
+    design = state.get("design", "")
+    approach = state.get("approach", "")
+    task = state.get("task") or []
+    implementation_summary = state.get("implementation_summary", "")
+    implementation_validation = state.get("implementation_validation", "")
+    test_output = state.get("test_output", "")
+    test_passed = state.get("test_passed", False)
+    test_failure_category = state.get("test_failure_category", "mixed_or_unclear")
+
+    review_llm = llm.with_structured_output(ReviewImplementationResponse)
+    response = review_llm.invoke(
+        [
+            SystemMessage(
+                content=(
+                    "You are reviewing implementation quality after coding + tests. "
+                    "Decide whether to finish or route to one next node.\n\n"
+                    "Return:\n"
+                    "- review_implementation_passed: true only if tasks appear complete, "
+                    "test coverage/edge-cases are acceptable for the scope, and latest tests are clean.\n"
+                    "- route: one of end, implement_app, implement_tests, run_test.\n"
+                    "- feedback_of_code: concrete app-code fixes (empty if none).\n"
+                    "- feedback_of_test_case: concrete testing gaps/fixes (empty if none).\n\n"
+                    "Routing guidance:\n"
+                    "- end: everything looks done and tests pass.\n"
+                    "- implement_app: app logic/features missing/incorrect.\n"
+                    "- implement_tests: tests/coverage/edge-cases insufficient.\n"
+                    "- run_test: implementation is done but tests need a rerun to verify.\n"
+                    "Prefer a single most useful next step."
+                )
+            ),
+            HumanMessage(
+                content=(
+                    "Detailed specifications:\n"
+                    f"{detailed_specifications}\n\n"
+                    "Design:\n"
+                    f"{design}\n\n"
+                    "Approach:\n"
+                    f"{approach}\n\n"
+                    "Task checklist:\n"
+                    f"{_format_task_list(task)}\n\n"
+                    "Implementation summary:\n"
+                    f"{implementation_summary}\n\n"
+                    "Implementation validation:\n"
+                    f"{implementation_validation}\n\n"
+                    f"Latest test_passed: {test_passed}\n"
+                    f"Latest test_failure_category: {test_failure_category}\n\n"
+                    "Latest test output:\n"
+                    f"{test_output}"
+                )
+            ),
+        ]
+    )
+
+    route = response.route if response.route in {"end", "implement_app", "implement_tests", "run_test"} else "implement_app"
+    return {
+        "review_implementation_passed": response.review_implementation_passed,
+        "review_implementation_route": route,
+        "feedback_of_code": response.feedback_of_code,
+        "feedback_of_test_case": response.feedback_of_test_case,
+    }
+
+def should_route_after_review_implementation(state: CodeAgentState):
+    review_passed = state.get("review_implementation_passed", False)
+    route = state.get("review_implementation_route", "implement_app")
+    feedback_of_code = (state.get("feedback_of_code") or "").strip()
+    feedback_of_test_case = (state.get("feedback_of_test_case") or "").strip()
+
+    # Deterministic guard rails: if review did not pass and feedback exists,
+    # force implementation loops instead of re-running tests immediately.
+    if not review_passed:
+        if feedback_of_test_case:
+            return "implement_tests"
+        if feedback_of_code:
+            return "implement_app"
+
+    if route == "end":
+        return END
+
+    if route == "run_test" and not review_passed:
+        # Do not allow run_test when reviewer explicitly marked failure.
+        return "implement_app"
+
+    if route in {"implement_app", "implement_tests", "run_test"}:
+        return route
+
     return "implement_app"

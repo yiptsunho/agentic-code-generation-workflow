@@ -21,6 +21,8 @@ class CodeAgentState(TypedDict):
     test_output: NotRequired[str]
     test_passed: NotRequired[bool]
     test_failure_category: NotRequired[str]
+    review_implementation_passed: NotRequired[bool]
+    review_implementation_route: NotRequired[str]
 
 class PlannerResponse(BaseModel):
     repo_context: str
@@ -52,4 +54,17 @@ class ImplementationValidationResponse(BaseModel):
 class TestFailureRoutingResponse(BaseModel):
     category: str = Field(
         description="One of: passed, test_only, app_logic, mixed_or_unclear"
+    )
+
+
+class ReviewImplementationResponse(BaseModel):
+    review_implementation_passed: bool
+    route: str = Field(
+        description="One of: end, implement_app, implement_tests, run_test"
+    )
+    feedback_of_code: str = Field(
+        description="Actionable feedback for app implementation fixes. Empty if none."
+    )
+    feedback_of_test_case: str = Field(
+        description="Actionable feedback for test-case improvements. Empty if none."
     )
