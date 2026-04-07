@@ -1,12 +1,14 @@
 from pathlib import Path
 from typing import Sequence
 
+from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ToolCallLimitMiddleware,
 )
 from langchain_community.agent_toolkits import FileManagementToolkit
+from langchain_community.tools import ShellTool
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -16,7 +18,15 @@ from langchain_core.messages import (
 )
 from langchain_openai import ChatOpenAI
 
-from my_agent.utils.state import CodeAgentState, DetailedSpecifications, PlannerResponse, ReviewPlanResponse
+from my_agent.utils.state import (
+    CodeAgentState,
+    DetailedSpecifications,
+    ImplementationSummaryResponse,
+    PlannerResponse,
+    ReviewPlanResponse,
+)
+from langchain_skills import SkillTool
+from my_agent.utils.tools import load_project_skills_markdown, load_skill
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
@@ -83,6 +93,31 @@ EXPLORE_RUN_TOOL_LIMIT = 12
 EXPLORE_MODEL_CALL_LIMIT = 22
 EXPLORER_RECURSION_LIMIT = 120
 
+IMPLEMENT_RUN_TOOL_LIMIT = 40
+IMPLEMENT_MODEL_CALL_LIMIT = 32
+IMPLEMENT_RECURSION_LIMIT = 180
+
+implement_system_prompt = """You are an expert software engineer implementing changes in a frontend repository.
+You can use the provided tools to read, write, copy, move and list. You can also use the provided skills.
+
+The user message may include a **Project skills** section with markdown guidance (stack, patterns, testing, etc.). Treat it as authoritative for conventions and tooling when it does not conflict with the detailed specifications or the task checklist.
+
+Goals:
+- Follow the detailed specifications, design, approach, the ordered task checklist, and the project skills.
+- Prefer reading existing files before editing; align with patterns and styles you find.
+- Complete every item in the task checklist before you stop. If something is truly blocked, explain it clearly in your final assistant message.
+
+Rules:
+- Make focused edits; do not refactor unrelated code or delete code unless a task requires it.
+- Paths are relative to the repository root exposed to the tools.
+- You may call `load_skill` with a skill folder name (e.g. `frontend-tech-stack`) if you need to re-read a skill; the same content is usually already inlined under Project skills.
+- Self-validate before finishing. Run `npm install`, then `npm run typecheck`, then `npm run dev`.
+- Treat typecheck/dev output as a quality gate. If errors appear, fix the code and re-run validation until there are no blocking errors.
+- For shell operations, use only `npm install`, `npm run dev` and `npm run typecheck` in the `frontend/` folder.
+- When you are finished, send one final assistant message that briefly states what you implemented and which files you changed. That final message must not include tool calls.
+- The GraphQL API, Apollo Client, and MSW are already configured and ready to use.
+"""
+
 def parse_specifications(state: CodeAgentState):
 
     raw_specifications = state["raw_specifications"]
@@ -95,7 +130,7 @@ def parse_specifications(state: CodeAgentState):
         "detailed_specifications": response.detailed_specifications
     }
 
-toolkit = FileManagementToolkit(
+explore_tool_kit = FileManagementToolkit(
     root_dir=str(Path("./frontend").resolve()),
     selected_tools=["read_file", "list_directory"],
 )
@@ -113,7 +148,7 @@ explorer_middleware = [
 
 repo_explorer = create_agent(
     model="gpt-4o-mini",
-    tools=toolkit.get_tools(),
+    tools=explore_tool_kit.get_tools(),
     system_prompt=explore_prompt,
     middleware=explorer_middleware,
 )
@@ -256,5 +291,108 @@ def should_start_implement(state: CodeAgentState):
 
     return "plan"
 
+implement_tool_kit = FileManagementToolkit(
+    root_dir=str(Path("./frontend").resolve()),
+    selected_tools=["copy_file", "file_search", "move_file", "write_file", "read_file", "list_directory"],
+).get_tools()
+
+implement_middleware = [
+    ToolCallLimitMiddleware(
+        run_limit=IMPLEMENT_RUN_TOOL_LIMIT,
+        exit_behavior="continue",
+    ),
+    ModelCallLimitMiddleware(
+        run_limit=IMPLEMENT_MODEL_CALL_LIMIT,
+        exit_behavior="end",
+    ),
+]
+
+skill_tool = SkillTool(directories="./skills")
+shell_tool = ShellTool()
+
+implement_tools = implement_tool_kit + [skill_tool, load_skill, shell_tool]
+
+# repo_coder = create_agent(
+#     model="gpt-4o-mini",
+#     tools=implement_tools,
+#     system_prompt=implement_system_prompt,
+#     middleware=implement_middleware,
+# )
+
+repo_coder = create_deep_agent(
+    model="gpt-4o-mini",
+    tools=implement_tools,
+    system_prompt=implement_system_prompt,
+    middleware=implement_middleware,
+)
+
 def implement(state: CodeAgentState):
-    return {}
+    detailed_specifications = state["detailed_specifications"]
+    repo_context = (state.get("repo_context") or "").strip()
+    design = (state.get("design") or "").strip()
+    approach = (state.get("approach") or "").strip()
+    task = state.get("task") or []
+    feedback_of_code = (state.get("feedback_of_code") or "").strip()
+
+    # skills_md = load_project_skills_markdown()
+    # skills_section = ""
+    # if skills_md:
+    #     skills_section = (
+    #         "## Project skills\n\n"
+    #         "Apply these conventions alongside the spec and task list:\n\n"
+    #         f"{skills_md}\n\n"
+    #     )
+
+    user_parts: list[str] = [
+        "Implement the following in the repository.\n\n",
+        # skills_section,
+        "Detailed specifications:\n\n",
+        detailed_specifications,
+        "\n\nRepo context (from exploration):\n\n",
+        repo_context or "(none)",
+        "\n\nDesign:\n\n",
+        design or "(none)",
+        "\n\nApproach:\n\n",
+        approach or "(none)",
+        "\n\nTask checklist (complete all items in order):\n\n",
+        _format_task_list(task),
+    ]
+    if feedback_of_code:
+        user_parts.append(
+            "\n\nPrior code review feedback to address in this pass:\n\n"
+            f"{feedback_of_code}"
+        )
+
+    coding = repo_coder.invoke(
+        {"messages": [HumanMessage(content="".join(user_parts))]},
+        config={"recursion_limit": IMPLEMENT_RECURSION_LIMIT},
+    )
+    transcript = _format_exploration_transcript(coding["messages"])
+
+    structured_llm = llm.with_structured_output(ImplementationSummaryResponse)
+    summary_response = structured_llm.invoke(
+        [
+            SystemMessage(
+                content=(
+                    "Summarize the implementation run. From the checklist and transcript, "
+                    "describe what was implemented and list relative file paths that were "
+                    "created or modified. If paths are unclear, infer them from tool messages; "
+                    "use an empty list only if no file changes occurred."
+                )
+            ),
+            HumanMessage(
+                content=(
+                    "Task checklist:\n\n"
+                    f"{_format_task_list(task)}\n\n"
+                    "---\n\n"
+                    "Agent transcript:\n\n"
+                    f"{transcript}"
+                )
+            ),
+        ]
+    )
+
+    return {
+        "implementation_summary": summary_response.summary,
+        "implementation_files": summary_response.files_touched,
+    }
