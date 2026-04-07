@@ -10,7 +10,7 @@ from my_agent.utils.nodes import (
     review_plan,
     should_continue_to_tests,
     should_finish_implementation,
-    should_start_implement,
+    should_start_implement, run_test, should_route_after_test,
 )
 from my_agent.utils.state import CodeAgentState
 
@@ -19,17 +19,11 @@ memory = MemorySaver()
 implementation_subgraph = StateGraph(CodeAgentState)
 implementation_subgraph.add_node("implement_app", implement_app)
 implementation_subgraph.add_node("implement_tests", implement_tests)
+implementation_subgraph.add_node("run_test", run_test)
 implementation_subgraph.add_edge(START, "implement_app")
-implementation_subgraph.add_conditional_edges(
-    "implement_app",
-    should_continue_to_tests,
-    ["implement_app", "implement_tests"],
-)
-implementation_subgraph.add_conditional_edges(
-    "implement_tests",
-    should_finish_implementation,
-    ["implement_tests", END],
-)
+implementation_subgraph.add_conditional_edges("implement_app", should_continue_to_tests, ["implement_app", "implement_tests"])
+implementation_subgraph.add_conditional_edges("implement_tests", should_finish_implementation, ["implement_tests", "run_test"])
+implementation_subgraph.add_conditional_edges("run_test", should_route_after_test, ["implement_tests", "implement_app", END])
 compiled_implementation_subgraph = implementation_subgraph.compile()
 
 main_graph = StateGraph(CodeAgentState)

@@ -16,6 +16,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_openai import ChatOpenAI
+from langgraph.constants import END
 
 from my_agent.utils.state import (
     CodeAgentState,
@@ -23,10 +24,10 @@ from my_agent.utils.state import (
     ImplementationSummaryResponse,
     ImplementationValidationResponse,
     PlannerResponse,
-    ReviewPlanResponse,
+    ReviewPlanResponse, TestFailureRoutingResponse,
 )
 from langchain_skills import SkillTool
-from my_agent.utils.tools import load_skill, run_frontend_npm
+from my_agent.utils.tools import FRONTEND_ROOT, load_skill, read_vitest_report_output, run_frontend_npm
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
@@ -319,7 +320,7 @@ def should_continue_to_tests(state: CodeAgentState):
 
 def should_finish_implementation(state: CodeAgentState):
     if state.get("implementation_typecheck_passed", False):
-        return "done"
+        return "run_test"
     return "implement_tests"
 
 implement_tool_kit = FileManagementToolkit(
@@ -370,6 +371,9 @@ def _run_implementation_phase(state: CodeAgentState, *, phase: str) -> dict:
     approach = (state.get("approach") or "").strip()
     full_task = state.get("task") or []
     feedback_of_code = (state.get("feedback_of_code") or "").strip()
+    test_output = (state.get("test_output") or "").strip()
+    test_passed = state.get("test_passed")
+    test_failure_category = (state.get("test_failure_category") or "").strip()
     app_tasks, test_tasks = _split_tasks(full_task)
     phase_task = app_tasks if phase == "app" else test_tasks
 
@@ -417,6 +421,15 @@ def _run_implementation_phase(state: CodeAgentState, *, phase: str) -> dict:
         user_parts.append(
             "\n\nPrior code review feedback to address in this pass:\n\n"
             f"{feedback_of_code}"
+        )
+    if test_output:
+        user_parts.append(
+            "\n\nLatest test run context from previous iteration:\n\n"
+            f"- test_passed: {test_passed}\n"
+            f"- test_failure_category: {test_failure_category or 'mixed_or_unclear'}\n\n"
+            "Use this to target fixes before re-running checks.\n\n"
+            "Raw test output:\n\n"
+            f"{test_output}"
         )
 
     coding = repo_coder.invoke(
@@ -489,3 +502,63 @@ def implement_app(state: CodeAgentState):
 
 def implement_tests(state: CodeAgentState):
     return _run_implementation_phase(state, phase="tests")
+
+def run_test(state: CodeAgentState):
+    report_path = FRONTEND_ROOT / ".tmp" / "vitest.json"
+    try:
+        if report_path.exists():
+            report_path.unlink()
+    except Exception:
+        # Non-fatal: fallback paths below still handle missing/freshness uncertainty.
+        pass
+
+    output = run_frontend_npm.invoke({"command": "npm run test"})
+    report_output = read_vitest_report_output()
+    compact_output = report_output or output
+    if not report_output:
+        compact_output += (
+            "\n\nnote: vitest JSON report was missing after this run; "
+            "used stdout fallback."
+        )
+
+    passed = "exit_code: 0" in output or "Success" in output
+    if report_output:
+        passed = "success: True" in report_output or "failed=0" in report_output
+    category = "passed"
+
+    if not passed:
+        routing_llm = llm.with_structured_output(TestFailureRoutingResponse)
+        routing = routing_llm.invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Classify test failures for routing. "
+                        "Return category as one of: passed, test_only, app_logic, mixed_or_unclear.\n\n"
+                        "Guidelines:\n"
+                        "- test_only: assertion mismatch, test setup/import/wrapper/mocks errors mainly in test files.\n"
+                        "- app_logic: runtime or logic errors rooted in app/components/hooks/services code.\n"
+                        "- mixed_or_unclear: both appear or unclear.\n"
+                        "Prefer test_only when failures are confined to test expectations/selectors/mocks."
+                    )
+                ),
+                HumanMessage(content=f"Test output:\n\n{compact_output}"),
+            ]
+        )
+        category = routing.category
+
+    return {
+        "test_output": compact_output,
+        "test_passed": passed,
+        "test_failure_category": category,
+    }
+
+def should_route_after_test(state: CodeAgentState):
+    if state.get("test_passed", False):
+        return END
+
+    category = state.get("test_failure_category", "mixed_or_unclear")
+    if category == "test_only":
+        return "implement_tests"
+
+    # app_logic or mixed_or_unclear => safer to fix app first
+    return "implement_app"

@@ -18,6 +18,9 @@ class CodeAgentState(TypedDict):
     implementation_files: NotRequired[list[str]]
     implementation_validation: NotRequired[str]
     implementation_typecheck_passed: NotRequired[bool]
+    test_output: NotRequired[str]
+    test_passed: NotRequired[bool]
+    test_failure_category: NotRequired[str]
 
 class PlannerResponse(BaseModel):
     repo_context: str
@@ -44,4 +47,9 @@ class ImplementationValidationResponse(BaseModel):
     summary: str
     typecheck_passed_final: bool = Field(
         description="True if the last `npm run typecheck` in the transcript exited with code 0."
+    )
+
+class TestFailureRoutingResponse(BaseModel):
+    category: str = Field(
+        description="One of: passed, test_only, app_logic, mixed_or_unclear"
     )
