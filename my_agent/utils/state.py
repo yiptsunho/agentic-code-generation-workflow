@@ -8,7 +8,8 @@ class CodeAgentState(TypedDict):
     design: str
     approach: str
     task: list[str]
-    comment_of_plan: str
+    plan_approved: bool
+    feedback_of_plan: str
     human_comment_of_plan: str
     comment_of_code: str
     comment_of_test_case: str
@@ -22,3 +23,7 @@ class PlannerResponse(BaseModel):
 
 class DetailedSpecifications(BaseModel):
     detailed_specifications: str
+
+class ReviewPlanResponse(BaseModel):
+    plan_approved: bool
+    feedback_of_plan: str
