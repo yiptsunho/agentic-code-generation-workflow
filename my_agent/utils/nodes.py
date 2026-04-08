@@ -887,7 +887,11 @@ def review_implementation(state: CodeAgentState):
         ]
     )
 
-    route = response.route if response.route in {"end", "implement_app", "implement_tests", "run_test"} else "implement_app"
+    route = (
+        response.route
+        if response.route in {"end", "implement_app", "implement_tests", "fix_test_cases", "run_test"}
+        else "implement_app"
+    )
     return {
         "review_implementation_passed": response.review_implementation_passed,
         "review_implementation_route": route,
@@ -905,7 +909,7 @@ def should_route_after_review_implementation(state: CodeAgentState):
     # force implementation loops instead of re-running tests immediately.
     if not review_passed:
         if feedback_of_test_case:
-            return "implement_tests"
+            return "fix_test_cases"
         if feedback_of_code:
             return "implement_app"
 
@@ -916,7 +920,7 @@ def should_route_after_review_implementation(state: CodeAgentState):
         # Do not allow run_test when reviewer explicitly marked failure.
         return "implement_app"
 
-    if route in {"implement_app", "implement_tests", "run_test"}:
+    if route in {"implement_app", "implement_tests", "fix_test_cases", "run_test"}:
         return route
 
     return "implement_app"

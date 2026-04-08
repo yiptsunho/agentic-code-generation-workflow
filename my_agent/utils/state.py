@@ -108,7 +108,7 @@ class TestFailureRoutingResponse(BaseModel):
 class ReviewImplementationResponse(BaseModel):
     review_implementation_passed: bool
     route: str = Field(
-        description="One of: end, implement_app, implement_tests, run_test"
+        description="One of: end, implement_app, implement_tests, fix_test_cases, run_test"
     )
     feedback_of_code: str = Field(
         description="Actionable feedback for app implementation fixes. Empty if none."
