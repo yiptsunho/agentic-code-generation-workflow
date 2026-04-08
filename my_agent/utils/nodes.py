@@ -149,7 +149,7 @@ def parse_specifications(state: CodeAgentState):
     }
 
 explore_tool_kit = FileManagementToolkit(
-    root_dir=str(Path("./frontend").resolve()),
+    root_dir=str(Path(".").resolve()),
     selected_tools=["read_file", "list_directory"],
 )
 
@@ -326,7 +326,7 @@ def should_finish_implementation(state: CodeAgentState):
     return "implement_tests"
 
 implement_tool_kit = FileManagementToolkit(
-    root_dir=str(Path("./frontend").resolve()),
+    root_dir=str(Path(".").resolve()),
     selected_tools=["copy_file", "file_search", "move_file", "write_file", "read_file", "list_directory"],
 ).get_tools()
 
