@@ -441,6 +441,7 @@ def implement_app(state: CodeAgentState):
         "Implement the following in the repository.\n\n",
         "Phase: application implementation only (exclude writing/updating tests). "
         "Do not create or edit test files in this phase.\n\n",
+        "Do not edit mock data\n\n",
         "**Quality gate:** After coding, run `npm install` then `npm run typecheck` via `run_frontend_npm`. "
         "If typecheck fails, fix the errors and re-run `npm run typecheck` until `exit_code` is 0. "
         "Do not stop with only a description of failures — apply code changes until typecheck passes or you document a specific blocker after multiple fix attempts. "
