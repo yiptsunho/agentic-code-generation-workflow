@@ -1,0 +1,13 @@
+1. Display a list of cars fetched via Apollo Client from a mock GraphQL API (GetCars query) served by MSW
+2. Show responsive car images — render the appropriate image based on viewport width:
+◦ ≤ 640px → mobile
+◦ 641px – 1023px → tablet
+◦ ≥ 1024px → desktop
+3. Use Material UI cards to present each car (make, model, year, color, image)
+4. Include an "Add Car" form that submits via a GraphQL mutation (AddCar)
+5. Implement sorting and search — a search bar to filter by model, plus sorting by year or make
+6. Extract GraphQL logic into a useCars() custom hook
+7. Include unit tests for key components
+8. A GetCar query to fetch individual cars
+9. A year filter (multi-filter support alongside model search)
+10. A reusable useCarFilters() hook combining all filter logic

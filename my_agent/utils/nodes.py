@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 from typing import Sequence
 
 from langchain.agents import create_agent
@@ -21,15 +20,20 @@ from langgraph.constants import END
 from my_agent.utils.state import (
     CodeAgentState,
     DetailedSpecifications,
-    ImplementationSummaryResponse,
-    ImplementationValidationResponse,
+    ImplementationPostRunResponse,
     PlannerResponse,
     ReviewImplementationResponse,
     ReviewPlanResponse,
+    SplitTaskResponse,
     TestFailureRoutingResponse,
 )
-from langchain_skills import SkillTool
-from my_agent.utils.tools import FRONTEND_ROOT, load_skill, read_vitest_report_output, run_frontend_npm
+from my_agent.utils.tools import (
+    FRONTEND_ROOT,
+    load_app_skills,
+    load_test_skills,
+    read_vitest_report_output,
+    run_frontend_npm, load_explore_repo_skills,
+)
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
@@ -96,6 +100,12 @@ EXPLORER_RECURSION_LIMIT = 120
 IMPLEMENT_RUN_TOOL_LIMIT = 100
 IMPLEMENT_MODEL_CALL_LIMIT = 100
 IMPLEMENT_RECURSION_LIMIT = 220
+IMPLEMENT_SPEC_MAX_CHARS = 5000
+IMPLEMENT_REPO_CONTEXT_MAX_CHARS = 1800
+IMPLEMENT_DESIGN_MAX_CHARS = 1800
+IMPLEMENT_APPROACH_MAX_CHARS = 1800
+IMPLEMENT_TEST_OUTPUT_MAX_CHARS = 3500
+TEST_FAILURE_SKIP_THRESHOLD = 4
 
 implement_system_prompt = """Implement frontend tasks with high signal and minimal turns.
 
@@ -110,6 +120,7 @@ Core constraints:
 Tool usage:
 - Batch same-kind tool calls in one turn whenever possible (group `list_directory`, then grouped reads, then grouped writes).
 - Prefer `file_search` and targeted reads over repeatedly listing directories.
+- Avoid re-reading the same file unless you have edited it or need specific unseen lines.
 - If multiple files need edits, complete them in one pass before validation.
 - Do not call `list_directory` (or other file-browsing tools) on `node_modules` or any path under it.
 
@@ -136,6 +147,16 @@ Do not stop with a failure report only. Finish with one assistant message (no to
 - remaining risks/blockers (if any).
 """
 
+split_task_system_prompt = """Split implementation checklist items into app tasks and test tasks.
+
+Rules:
+- `app_task`: product code work (components, hooks, data layer, styling, app behavior, refactors for app logic).
+- `test_task`: test-only work (adding/updating tests, fixtures, test setup, mocks for tests, assertions).
+- Keep original wording as much as possible.
+- Every input task should appear in exactly one list.
+- If a task mixes app and test work, prefer placing it in `app_task`.
+"""
+
 def parse_specifications(state: CodeAgentState):
 
     raw_specifications = state["raw_specifications"]
@@ -149,7 +170,7 @@ def parse_specifications(state: CodeAgentState):
     }
 
 explore_tool_kit = FileManagementToolkit(
-    root_dir=str(Path("./frontend").resolve()),
+    root_dir=str(Path(".").resolve()),
     selected_tools=["read_file", "list_directory"],
 )
 
@@ -166,7 +187,7 @@ explorer_middleware = [
 
 repo_explorer = create_agent(
     model="gpt-4o-mini",
-    tools=explore_tool_kit.get_tools(),
+    tools=explore_tool_kit.get_tools() + [load_explore_repo_skills],
     system_prompt=explore_prompt,
     middleware=explorer_middleware,
 )
@@ -304,6 +325,32 @@ def review_plan(state: CodeAgentState):
     }
 
 
+def split_task(state: CodeAgentState):
+    task = state.get("task") or []
+    detailed_specifications = state.get("detailed_specifications", "")
+
+    if not task:
+        return {"app_task": [], "test_task": []}
+
+    structured_llm = llm.with_structured_output(SplitTaskResponse)
+    response = structured_llm.invoke(
+        [
+            SystemMessage(content=split_task_system_prompt),
+            HumanMessage(
+                content=(
+                    "Detailed specifications:\n"
+                    f"{detailed_specifications}\n\n"
+                    "Checklist to split:\n"
+                    f"{_format_task_list(task)}"
+                )
+            ),
+        ]
+    )
+    return {
+        "app_task": response.app_task,
+        "test_task": response.test_task,
+    }
+
 
 def should_start_implement(state: CodeAgentState):
     plan_approved = state["plan_approved"]
@@ -326,7 +373,7 @@ def should_finish_implementation(state: CodeAgentState):
     return "implement_tests"
 
 implement_tool_kit = FileManagementToolkit(
-    root_dir=str(Path("./frontend").resolve()),
+    root_dir=str(Path(".").resolve()),
     selected_tools=["copy_file", "file_search", "move_file", "write_file", "read_file", "list_directory"],
 ).get_tools()
 
@@ -341,91 +388,191 @@ implement_middleware = [
     ),
 ]
 
-skill_tool = SkillTool(directories="./skills")
+implement_app_tools = implement_tool_kit + [load_app_skills, run_frontend_npm]
+implement_test_tools = implement_tool_kit + [load_test_skills, run_frontend_npm]
 
-implement_tools = implement_tool_kit + [load_skill, run_frontend_npm]
-
-repo_coder = create_agent(
+repo_coder_app = create_agent(
     model="gpt-5.4-mini",
-    tools=implement_tools,
+    tools=implement_app_tools,
     system_prompt=implement_system_prompt,
     middleware=implement_middleware,
 )
 
+repo_coder_tests = create_agent(
+    model="gpt-5.4-mini",
+    tools=implement_test_tools,
+    system_prompt=implement_system_prompt,
+    middleware=implement_middleware,
+)
 
-def _split_tasks(task: list[str]) -> tuple[list[str], list[str]]:
-    """Split plan tasks into app tasks and test tasks."""
-    test_keywords = re.compile(r"\b(test|tests|testing|vitest|unit test|integration test)\b", re.IGNORECASE)
-    app_tasks: list[str] = []
-    test_tasks: list[str] = []
-    for item in task:
-        if test_keywords.search(item):
-            test_tasks.append(item)
-        else:
-            app_tasks.append(item)
-    return app_tasks, test_tasks
+def _truncate_text(text: str, *, max_chars: int) -> str:
+    value = (text or "").strip()
+    if len(value) <= max_chars:
+        return value or "(none)"
+    return value[:max_chars] + "\n... [truncated]"
 
 
-def _run_implementation_phase(state: CodeAgentState, *, phase: str) -> dict:
+def implement_app(state: CodeAgentState):
     detailed_specifications = state["detailed_specifications"]
     repo_context = (state.get("repo_context") or "").strip()
     design = (state.get("design") or "").strip()
     approach = (state.get("approach") or "").strip()
-    full_task = state.get("task") or []
+    app_task = state.get("app_task") or state.get("task") or []
     feedback_of_code = (state.get("feedback_of_code") or "").strip()
-    feedback_of_test_case = (state.get("feedback_of_test_case") or "").strip()
-    test_output = (state.get("test_output") or "").strip()
-    test_passed = state.get("test_passed")
-    test_failure_category = (state.get("test_failure_category") or "").strip()
-    app_tasks, test_tasks = _split_tasks(full_task)
-    phase_task = app_tasks if phase == "app" else test_tasks
 
-    if phase == "app":
-        phase_header = (
-            "Phase: application implementation only (exclude writing/updating tests). "
-            "Do not create or edit test files in this phase.\n\n"
-        )
-        task_instructions = (
-            "Use only non-test tasks from the checklist below. "
-            "If a task mixes app+test work, do only the app portion now.\n\n"
-        )
-    else:
-        phase_header = (
-            "Phase: test implementation only. "
-            "Write/update tests for the already implemented features.\n\n"
-        )
-        task_instructions = (
-            "Use only test-related tasks from the checklist below. "
-            "Do not make unrelated feature changes in this phase.\n\n"
-        )
-
-    shown_tasks = phase_task if phase_task else full_task
+    spec_for_phase = _truncate_text(
+        detailed_specifications,
+        max_chars=IMPLEMENT_SPEC_MAX_CHARS,
+    )
+    repo_context_for_phase = _truncate_text(
+        repo_context,
+        max_chars=IMPLEMENT_REPO_CONTEXT_MAX_CHARS,
+    )
+    design_for_phase = _truncate_text(
+        design,
+        max_chars=IMPLEMENT_DESIGN_MAX_CHARS,
+    )
+    approach_for_phase = _truncate_text(
+        approach,
+        max_chars=IMPLEMENT_APPROACH_MAX_CHARS,
+    )
 
     user_parts: list[str] = [
         "Implement the following in the repository.\n\n",
-        phase_header,
+        "Phase: application implementation only (exclude writing/updating tests). "
+        "Do not create or edit test files in this phase.\n\n",
+        "Do not edit mock data\n\n",
         "**Quality gate:** After coding, run `npm install` then `npm run typecheck` via `run_frontend_npm`. "
         "If typecheck fails, fix the errors and re-run `npm run typecheck` until `exit_code` is 0. "
         "Do not stop with only a description of failures — apply code changes until typecheck passes or you document a specific blocker after multiple fix attempts. "
         "Work efficiently: batch file discovery/reads/writes so each iteration accomplishes substantial progress.\n\n",
-        task_instructions,
+        "Use only app-related tasks from the checklist below. "
+        "If a task mixes app+test work, do only the app portion now.\n\n",
         "Detailed specifications:\n\n",
-        detailed_specifications,
+        spec_for_phase,
         "\n\nRepo context (from exploration):\n\n",
-        repo_context or "(none)",
+        repo_context_for_phase,
         "\n\nDesign:\n\n",
-        design or "(none)",
+        design_for_phase,
         "\n\nApproach:\n\n",
-        approach or "(none)",
+        approach_for_phase,
         "\n\nTask checklist for this phase:\n\n",
-        _format_task_list(shown_tasks),
+        _format_task_list(app_task),
     ]
     if feedback_of_code:
         user_parts.append(
             "\n\nPrior code review feedback to address in this pass:\n\n"
             f"{feedback_of_code}"
         )
-    if phase == "tests" and feedback_of_test_case:
+
+    coding = repo_coder_app.invoke(
+        {"messages": [HumanMessage(content="".join(user_parts))]},
+        config={"recursion_limit": IMPLEMENT_RECURSION_LIMIT},
+    )
+    transcript = _format_exploration_transcript(
+        coding["messages"],
+        tool_body_limit=20000,
+    )
+
+    post_run_llm = llm.with_structured_output(ImplementationPostRunResponse)
+    post_run_response = post_run_llm.invoke(
+        [
+            SystemMessage(
+                content=(
+                    "Analyze this implementation run and return ONE combined structured response.\n\n"
+                    "You must provide:\n"
+                    "1) summary: what was implemented, grounded in checklist + transcript.\n"
+                    "2) files_touched: relative file paths created/modified (infer from tool messages). "
+                    "Use [] only if no file changes occurred.\n"
+                    "3) validation_summary: npm self-check interpretation focused on ToolMessage content "
+                    "from `run_frontend_npm`.\n"
+                    "4) typecheck_passed_final: determine from the LAST `npm run typecheck` result in transcript; "
+                    "true only if exit_code is 0 (or output clearly indicates success with no TS errors).\n\n"
+                    "Validation requirements:\n"
+                    "- Cover npm install, npm run typecheck (final state), and npm run dev if present.\n"
+                    "- If the last typecheck still failed, explicitly say the run did NOT finish clean and list "
+                    "remaining diagnostics.\n"
+                    "- Treat npm run dev timeout/exit_code -1 as expected for Vite when startup looks healthy.\n"
+                    "- If npm tools are absent, say so."
+                )
+            ),
+            HumanMessage(
+                content=(
+                    "Task checklist:\n\n"
+                    f"{_format_task_list(app_task)}\n\n"
+                    "---\n\n"
+                    "Agent transcript:\n\n"
+                    f"{transcript}"
+                )
+            ),
+        ]
+    )
+
+    return {
+        "implementation_summary": post_run_response.summary,
+        "implementation_files": post_run_response.files_touched,
+        "implementation_validation": post_run_response.validation_summary,
+        "implementation_typecheck_passed": post_run_response.typecheck_passed_final,
+    }
+
+
+def implement_tests(state: CodeAgentState):
+    detailed_specifications = state["detailed_specifications"]
+    repo_context = (state.get("repo_context") or "").strip()
+    design = (state.get("design") or "").strip()
+    approach = (state.get("approach") or "").strip()
+    test_task = state.get("test_task") or state.get("task") or []
+    feedback_of_test_case = (state.get("feedback_of_test_case") or "").strip()
+    test_output = (state.get("test_output") or "").strip()
+    test_passed = state.get("test_passed")
+    test_failure_category = (state.get("test_failure_category") or "").strip()
+    test_failure_repeat_count = state.get("test_failure_repeat_count", 0)
+
+    spec_for_phase = _truncate_text(
+        detailed_specifications,
+        max_chars=IMPLEMENT_SPEC_MAX_CHARS,
+    )
+    repo_context_for_phase = _truncate_text(
+        repo_context,
+        max_chars=IMPLEMENT_REPO_CONTEXT_MAX_CHARS,
+    )
+    design_for_phase = _truncate_text(
+        design,
+        max_chars=IMPLEMENT_DESIGN_MAX_CHARS,
+    )
+    approach_for_phase = _truncate_text(
+        approach,
+        max_chars=IMPLEMENT_APPROACH_MAX_CHARS,
+    )
+
+    user_parts: list[str] = [
+        "Implement the following in the repository.\n\n",
+        "Phase: test implementation only. "
+        "Write/update tests for the already implemented features.\n\n",
+        "**Quality gate:** After coding, run `npm install` then `npm run typecheck` via `run_frontend_npm`. "
+        "If typecheck fails, fix the errors and re-run `npm run typecheck` until `exit_code` is 0. "
+        "Do not stop with only a description of failures — apply code changes until typecheck passes or you document a specific blocker after multiple fix attempts. "
+        "Work efficiently: batch file discovery/reads/writes so each iteration accomplishes substantial progress.\n\n",
+        "Before writing or editing any test files, call `load_test_skills` to load the relevant testing skill guidance.\n"
+        "Use the existing `src/__tests__` directory for test files in this repo; do not create a new `tests` folder or alternate test directory.\n"
+        "Native form validation warning: required/input constraints may block submit handlers, so custom alert/error UI may not appear from a submit-click path.\n"
+        "Convergence policy: if test output is unchanged across consecutive failed runs (see repeat_count), first write a short root-cause analysis "
+        "(what failed, why previous fix did not work, and what different strategy you will try), then edit.\n"
+        "Do not repeat the same micro-fix pattern; use a materially different approach for that file.\n"
+        "Use only test-related tasks from the checklist below. "
+        "Do not make unrelated feature changes in this phase.\n\n",
+        "Detailed specifications:\n\n",
+        spec_for_phase,
+        "\n\nRepo context (from exploration):\n\n",
+        repo_context_for_phase,
+        "\n\nDesign:\n\n",
+        design_for_phase,
+        "\n\nApproach:\n\n",
+        approach_for_phase,
+        "\n\nTask checklist for this phase:\n\n",
+        _format_task_list(test_task),
+    ]
+    if feedback_of_test_case:
         user_parts.append(
             "\n\nPrior test-case review feedback to address in this pass:\n\n"
             f"{feedback_of_test_case}"
@@ -435,12 +582,13 @@ def _run_implementation_phase(state: CodeAgentState, *, phase: str) -> dict:
             "\n\nLatest test run context from previous iteration:\n\n"
             f"- test_passed: {test_passed}\n"
             f"- test_failure_category: {test_failure_category or 'mixed_or_unclear'}\n\n"
+            f"- test_failure_repeat_count: {test_failure_repeat_count}\n\n"
             "Use this to target fixes before re-running checks.\n\n"
             "Raw test output:\n\n"
-            f"{test_output}"
+            f"{_truncate_text(test_output, max_chars=IMPLEMENT_TEST_OUTPUT_MAX_CHARS)}"
         )
 
-    coding = repo_coder.invoke(
+    coding = repo_coder_tests.invoke(
         {"messages": [HumanMessage(content="".join(user_parts))]},
         config={"recursion_limit": IMPLEMENT_RECURSION_LIMIT},
     )
@@ -449,21 +597,32 @@ def _run_implementation_phase(state: CodeAgentState, *, phase: str) -> dict:
         tool_body_limit=20000,
     )
 
-    structured_llm = llm.with_structured_output(ImplementationSummaryResponse)
-    summary_response = structured_llm.invoke(
+    post_run_llm = llm.with_structured_output(ImplementationPostRunResponse)
+    post_run_response = post_run_llm.invoke(
         [
             SystemMessage(
                 content=(
-                    "Summarize the implementation run. From the checklist and transcript, "
-                    "describe what was implemented and list relative file paths that were "
-                    "created or modified. If paths are unclear, infer them from tool messages; "
-                    "use an empty list only if no file changes occurred."
+                    "Analyze this implementation run and return ONE combined structured response.\n\n"
+                    "You must provide:\n"
+                    "1) summary: what was implemented, grounded in checklist + transcript.\n"
+                    "2) files_touched: relative file paths created/modified (infer from tool messages). "
+                    "Use [] only if no file changes occurred.\n"
+                    "3) validation_summary: npm self-check interpretation focused on ToolMessage content "
+                    "from `run_frontend_npm`.\n"
+                    "4) typecheck_passed_final: determine from the LAST `npm run typecheck` result in transcript; "
+                    "true only if exit_code is 0 (or output clearly indicates success with no TS errors).\n\n"
+                    "Validation requirements:\n"
+                    "- Cover npm install, npm run typecheck (final state), and npm run dev if present.\n"
+                    "- If the last typecheck still failed, explicitly say the run did NOT finish clean and list "
+                    "remaining diagnostics.\n"
+                    "- Treat npm run dev timeout/exit_code -1 as expected for Vite when startup looks healthy.\n"
+                    "- If npm tools are absent, say so."
                 )
             ),
             HumanMessage(
                 content=(
                     "Task checklist:\n\n"
-                    f"{_format_task_list(shown_tasks)}\n\n"
+                    f"{_format_task_list(test_task)}\n\n"
                     "---\n\n"
                     "Agent transcript:\n\n"
                     f"{transcript}"
@@ -472,46 +631,111 @@ def _run_implementation_phase(state: CodeAgentState, *, phase: str) -> dict:
         ]
     )
 
-    validation_llm = llm.with_structured_output(ImplementationValidationResponse)
-    validation_response = validation_llm.invoke(
+    return {
+        "implementation_summary": post_run_response.summary,
+        "implementation_files": post_run_response.files_touched,
+        "implementation_validation": post_run_response.validation_summary,
+        "implementation_typecheck_passed": post_run_response.typecheck_passed_final,
+    }
+
+
+def fix_test_cases(state: CodeAgentState):
+    """Repair tests after `run_test` failures — focused prompt, then re-run tests from graph edge."""
+    detailed_specifications = state["detailed_specifications"]
+    test_task = state.get("test_task") or state.get("task") or []
+    feedback_of_test_case = (state.get("feedback_of_test_case") or "").strip()
+    test_output = (state.get("test_output") or "").strip()
+    test_passed = state.get("test_passed")
+    test_failure_category = (state.get("test_failure_category") or "").strip()
+    test_failure_repeat_count = state.get("test_failure_repeat_count", 0)
+
+    spec_for_phase = _truncate_text(
+        detailed_specifications,
+        max_chars=IMPLEMENT_SPEC_MAX_CHARS,
+    )
+
+    user_parts: list[str] = [
+        "Fix failing frontend tests based on the latest test run output.\n\n",
+        "Phase: test repair only (do not change application feature code except types/imports strictly required for tests).\n\n",
+        "**Quality gate:** Run `npm install` then `npm run typecheck` via `run_frontend_npm` until clean.\n\n",
+        "Before editing, call `load_test_skills`.\n"
+        "Use only `src/__tests__` for test files; do not add a separate `tests` folder.\n"
+        "Native `required` fields may block submit — align assertions with native vs component validation.\n"
+        "If repeat_count indicates unchanged failures, write a short root-cause analysis before a different fix strategy.\n\n",
+        "Detailed specifications (context):\n\n",
+        spec_for_phase,
+        "\n\nRelevant test checklist (from plan split):\n\n",
+        _format_task_list(test_task),
+    ]
+    if feedback_of_test_case:
+        user_parts.append(
+            "\n\nReviewer test feedback:\n\n"
+            f"{feedback_of_test_case}"
+        )
+    user_parts.append(
+        "\n\nLatest automated test run (primary signal):\n\n"
+        f"- test_passed: {test_passed}\n"
+        f"- test_failure_category: {test_failure_category or 'mixed_or_unclear'}\n"
+        f"- test_failure_repeat_count: {test_failure_repeat_count}\n\n"
+        "Raw output:\n\n"
+        f"{_truncate_text(test_output, max_chars=IMPLEMENT_TEST_OUTPUT_MAX_CHARS)}"
+    )
+
+    coding = repo_coder_tests.invoke(
+        {"messages": [HumanMessage(content="".join(user_parts))]},
+        config={"recursion_limit": IMPLEMENT_RECURSION_LIMIT},
+    )
+    transcript = _format_exploration_transcript(
+        coding["messages"],
+        tool_body_limit=20000,
+    )
+
+    post_run_llm = llm.with_structured_output(ImplementationPostRunResponse)
+    post_run_response = post_run_llm.invoke(
         [
             SystemMessage(
                 content=(
-                    "You interpret npm self-check results from an agent transcript. "
-                    "Focus on ToolMessage content from `run_frontend_npm`. "
-                    "Determine **typecheck_passed_final** from the **last** "
-                    "`npm run typecheck` result in the transcript: true only if its "
-                    "exit_code is 0 (or output clearly shows success with no TS errors). "
-                    "For each of `npm install`, `npm run typecheck` (final state), and "
-                    "`npm run dev`, briefly state pass/fail and cite key log lines. "
-                    "If the agent described errors but the last typecheck still failed, "
-                    "say clearly that the run did **not** finish with a clean typecheck "
-                    "and list remaining diagnostics. "
-                    "Explain dev `exit_code -1`/timeout notes — expected for Vite. "
-                    "If no npm tools appear in the transcript, say so. "
-                    "Write a concise summary a human can trust without re-reading raw logs."
+                    "Analyze this test-fix run and return ONE combined structured response.\n\n"
+                    "You must provide:\n"
+                    "1) summary: what was fixed, grounded in checklist + transcript.\n"
+                    "2) files_touched: relative file paths created/modified (infer from tool messages). "
+                    "Use [] only if no file changes occurred.\n"
+                    "3) validation_summary: npm self-check interpretation focused on ToolMessage content "
+                    "from `run_frontend_npm`.\n"
+                    "4) typecheck_passed_final: determine from the LAST `npm run typecheck` result in transcript; "
+                    "true only if exit_code is 0 (or output clearly indicates success with no TS errors).\n\n"
+                    "Validation requirements:\n"
+                    "- Cover npm install, npm run typecheck (final state), and npm run dev if present.\n"
+                    "- If the last typecheck still failed, explicitly say the run did NOT finish clean and list "
+                    "remaining diagnostics.\n"
+                    "- Treat npm run dev timeout/exit_code -1 as expected for Vite when startup looks healthy.\n"
+                    "- If npm tools are absent, say so."
                 )
             ),
-            HumanMessage(content=f"Transcript:\n\n{transcript}"),
+            HumanMessage(
+                content=(
+                    "Task checklist:\n\n"
+                    f"{_format_task_list(test_task)}\n\n"
+                    "---\n\n"
+                    "Agent transcript:\n\n"
+                    f"{transcript}"
+                )
+            ),
         ]
     )
 
     return {
-        "implementation_summary": summary_response.summary,
-        "implementation_files": summary_response.files_touched,
-        "implementation_validation": validation_response.summary,
-        "implementation_typecheck_passed": validation_response.typecheck_passed_final,
+        "implementation_summary": post_run_response.summary,
+        "implementation_files": post_run_response.files_touched,
+        "implementation_validation": post_run_response.validation_summary,
+        "implementation_typecheck_passed": post_run_response.typecheck_passed_final,
     }
 
 
-def implement_app(state: CodeAgentState):
-    return _run_implementation_phase(state, phase="app")
-
-
-def implement_tests(state: CodeAgentState):
-    return _run_implementation_phase(state, phase="tests")
-
 def run_test(state: CodeAgentState):
+    prev_test_output = (state.get("test_output") or "").strip()
+    prev_repeat_count = int(state.get("test_failure_repeat_count") or 0)
+
     report_path = FRONTEND_ROOT / ".tmp" / "vitest.json"
     try:
         if report_path.exists():
@@ -533,8 +757,13 @@ def run_test(state: CodeAgentState):
     if report_output:
         passed = "success: True" in report_output or "failed=0" in report_output
     category = "passed"
+    repeat_count = 0
+    errors_skipped = False
+    unresolved_summary = ""
 
-    if not passed:
+    if passed:
+        repeat_count = 0
+    else:
         routing_llm = llm.with_structured_output(TestFailureRoutingResponse)
         routing = routing_llm.invoke(
             [
@@ -553,23 +782,49 @@ def run_test(state: CodeAgentState):
             ]
         )
         category = routing.category
+        current = compact_output.strip()
+        if prev_test_output and current == prev_test_output:
+            repeat_count = prev_repeat_count + 1
+        else:
+            repeat_count = 1
+        if repeat_count >= TEST_FAILURE_SKIP_THRESHOLD:
+            errors_skipped = True
+            unresolved_summary = (
+                "Skipped repeated test failure after convergence threshold.\n"
+                f"- repeat_count: {repeat_count}\n"
+                f"- category: {category}\n"
+                "- note: test output matched the previous failed run's output."
+            )
 
     return {
         "test_output": compact_output,
         "test_passed": passed,
         "test_failure_category": category,
+        "test_failure_repeat_count": repeat_count,
+        "test_errors_skipped": errors_skipped,
+        "unresolved_test_errors": unresolved_summary,
     }
+
 
 def should_route_after_test(state: CodeAgentState):
     if state.get("test_passed", False):
         return "review_implementation"
 
-    category = state.get("test_failure_category", "mixed_or_unclear")
-    if category == "test_only":
-        return "implement_tests"
+    if state.get("test_errors_skipped", False):
+        return "review_implementation"
 
-    # app_logic or mixed_or_unclear => safer to fix app first
+    category = state.get("test_failure_category", "mixed_or_unclear")
+    repeat_count = state.get("test_failure_repeat_count", 0)
+    if repeat_count >= 2:
+        return "fix_test_cases"
+    if category == "test_only":
+        return "fix_test_cases"
+
+    # app_logic: fix product code first; mixed: try dedicated test repair before app
+    if category == "mixed_or_unclear":
+        return "fix_test_cases"
     return "implement_app"
+
 
 def review_implementation(state: CodeAgentState):
     detailed_specifications = state.get("detailed_specifications", "")
@@ -577,10 +832,13 @@ def review_implementation(state: CodeAgentState):
     approach = state.get("approach", "")
     task = state.get("task") or []
     implementation_summary = state.get("implementation_summary", "")
+    implementation_files = state.get("implementation_files") or []
     implementation_validation = state.get("implementation_validation", "")
     test_output = state.get("test_output", "")
     test_passed = state.get("test_passed", False)
     test_failure_category = state.get("test_failure_category", "mixed_or_unclear")
+    test_errors_skipped = state.get("test_errors_skipped", False)
+    unresolved_test_errors = state.get("unresolved_test_errors", "")
 
     review_llm = llm.with_structured_output(ReviewImplementationResponse)
     response = review_llm.invoke(
@@ -592,14 +850,16 @@ def review_implementation(state: CodeAgentState):
                     "Return:\n"
                     "- review_implementation_passed: true only if tasks appear complete, "
                     "test coverage/edge-cases are acceptable for the scope, and latest tests are clean.\n"
-                    "- route: one of end, implement_app, implement_tests, run_test.\n"
+                    "- route: one of end, implement_app, implement_tests, fix_test_cases, run_test.\n"
                     "- feedback_of_code: concrete app-code fixes (empty if none).\n"
                     "- feedback_of_test_case: concrete testing gaps/fixes (empty if none).\n\n"
                     "Routing guidance:\n"
                     "- end: everything looks done and tests pass.\n"
                     "- implement_app: app logic/features missing/incorrect.\n"
-                    "- implement_tests: tests/coverage/edge-cases insufficient.\n"
+                    "- implement_tests: add or expand tests/coverage from scratch.\n"
+                    "- fix_test_cases: failing tests need targeted repair (assertions, mocks, setup).\n"
                     "- run_test: implementation is done but tests need a rerun to verify.\n"
+                    "- If `test_errors_skipped` is true, treat unresolved_test_errors as a blocking risk and avoid passing review unless explicitly acceptable.\n"
                     "Prefer a single most useful next step."
                 )
             ),
@@ -619,6 +879,8 @@ def review_implementation(state: CodeAgentState):
                     f"{implementation_validation}\n\n"
                     f"Latest test_passed: {test_passed}\n"
                     f"Latest test_failure_category: {test_failure_category}\n\n"
+                    f"Latest test_errors_skipped: {test_errors_skipped}\n"
+                    f"Unresolved test errors:\n{unresolved_test_errors or '(none)'}\n\n"
                     "Latest test output:\n"
                     f"{test_output}"
                 )
@@ -626,7 +888,11 @@ def review_implementation(state: CodeAgentState):
         ]
     )
 
-    route = response.route if response.route in {"end", "implement_app", "implement_tests", "run_test"} else "implement_app"
+    route = (
+        response.route
+        if response.route in {"end", "implement_app", "implement_tests", "fix_test_cases", "run_test"}
+        else "implement_app"
+    )
     return {
         "review_implementation_passed": response.review_implementation_passed,
         "review_implementation_route": route,
@@ -644,7 +910,7 @@ def should_route_after_review_implementation(state: CodeAgentState):
     # force implementation loops instead of re-running tests immediately.
     if not review_passed:
         if feedback_of_test_case:
-            return "implement_tests"
+            return "fix_test_cases"
         if feedback_of_code:
             return "implement_app"
 
@@ -655,7 +921,7 @@ def should_route_after_review_implementation(state: CodeAgentState):
         # Do not allow run_test when reviewer explicitly marked failure.
         return "implement_app"
 
-    if route in {"implement_app", "implement_tests", "run_test"}:
+    if route in {"implement_app", "implement_tests", "fix_test_cases", "run_test"}:
         return route
 
     return "implement_app"

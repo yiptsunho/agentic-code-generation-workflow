@@ -90,11 +90,54 @@ def read_vitest_report_output() -> str:
 @tool
 def load_skill(skill_name: str) -> str:
     """Load a specialized skill prompt.
-    Available: frontend-tech-stack
+    Available: frontend-explore-repo, frontend-implement-app, frontend-implement-test
     """
     # Logic to read the SKILL.md file from a directory
     with open(f"./skills/{skill_name}/SKILL.md", "r") as f:
         return f.read()
+
+@tool
+def load_explore_repo_skills(skill_name: str) -> str:
+    """Load a specialized skill prompt.
+    Available: frontend-explore-repo
+    """
+    allowed = {"frontend-explore-repo"}
+    if skill_name not in allowed:
+        return (
+            f"Rejected skill: '{skill_name}'. "
+            "Allowed skills only: frontend-explore-repo."
+        )
+    with open(f"./skills/{skill_name}/SKILL.md", "r", encoding="utf-8") as f:
+        return f.read()
+
+@tool
+def load_app_skills(skill_name: str) -> str:
+    """Load a specialized skill prompt.
+    Available: frontend-implement-app
+    """
+    allowed = {"frontend-implement-app"}
+    if skill_name not in allowed:
+        return (
+            f"Rejected skill: '{skill_name}'. "
+            "Allowed skills only: frontend-implement-app."
+        )
+    with open(f"./skills/{skill_name}/SKILL.md", "r", encoding="utf-8") as f:
+        return f.read()
+
+@tool
+def load_test_skills(skill_name: str) -> str:
+    """Load a specialized skill prompt.
+    Available: frontend-implement-app, frontend-implement-test
+    """
+    allowed = {"frontend-implement-app", "frontend-implement-test"}
+    if skill_name not in allowed:
+        return (
+            f"Rejected skill: '{skill_name}'. "
+            "Allowed skills only: frontend-implement-app, frontend-implement-test."
+        )
+    with open(f"./skills/{skill_name}/SKILL.md", "r", encoding="utf-8") as f:
+        return f.read()
+
 
 
 def _format_cmd_result(
