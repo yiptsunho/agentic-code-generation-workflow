@@ -31,7 +31,9 @@ langgraph dev
 ```
 
 ### Rollback changes in boilerplate
-This bash script with the option `--clean-untracked` will roll back all changes and remove node_modules folder
+Use the rollback script to reset `frontend/` to Git `HEAD` and remove `frontend/node_modules`.
+
+macOS/Linux (bash):
 ```bash
 ./scripts/rollback_frontend.sh --clean-untracked
 ```
@@ -47,26 +49,48 @@ This bash script with the option `--clean-untracked` will roll back all changes 
 For this take home challenge, I took inspiration of [OpenSpec](https://github.com/Fission-AI/OpenSpec), a very popular spec-driven framework that I really like to use when coding with Cursor. I took the concepts of **design.md**, **approach.md** and **task.md** from this framework, which are useful in minimizing hallucinations of LLMs and ensure that LLMs stay coherent the whole time.
 
 ## Architecture
-**Multi-stage self-validation**, **LLM-as-judge**, **skills pattern** and **tool use** throughout the whole workflow allows this agent to produce high-quality code without sacrificing governance and flexibility.
+|                           | Graph                                            | Description                                                                                                                                                                                                                                                                                                                                                                                                                |
+|:--------------------------|:-------------------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Main Graph                | <img src="./static/main_graph.png" height="30%"> | The main graph uses a **ReAct pattern** in the planning stage to make sure the agent gets enough context from the frontend repository with available tools. It also uses an **evaluator-optimizer pattern** to validate the plan.                                                                                                                                                                                          |
+| Subgraph (Implementation) | <img src="./static/subgraph_2.png" height="50%"> | Inside the implementation stage, both implement_app and implement_test use the **ReAct pattern** and has its **own evaluator** to make sure all requirements are met before moving on to the next stage. On test errors, run_test node routes to implement_app or fix_test_cases based on the error type. review_implementation ensures all tasks are done and the test coverage is enough before completing the workflow. |
 
-|                           | Graph                                               | Description                                                                                                                                                                                                                                                                                                                                                                                                                |
-|:--------------------------|:----------------------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Main Graph                | <img src="./static/main_graph.png" height="30%">    | The main graph uses a **ReAct pattern** in the planning stage to make sure the agent gets enough context from the frontend repository with available tools. It also uses an **evaluator-optimizer pattern** to validate the plan.                                                                                                                                                                                          |
-| Subgraph (Implementation) | ![Subgraph (implementation)](static/subgraph_2.png) | Inside the implementation stage, both implement_app and implement_test use the **ReAct pattern** and has its **own evaluator** to make sure all requirements are met before moving on to the next stage. On test errors, run_test node routes to implement_app or fix_test_cases based on the error type. review_implementation ensures all tasks are done and the test coverage is enough before completing the workflow. |
+This agent is designed as a **multi-stage LangGraph workflow** that separates planning, implementation, testing, and review.  
+The main goal is to keep generation quality high while staying deterministic enough for repeated runs.
 
-[//]: # (| Subgraph &#40;plan&#41;           | ![Subgraph &#40;plan&#41;]&#40;./static/subgraph_1.png&#41;      
-### Evaluator
-                                                                                                                                                                                                                                                                                                                                                          | Inside the planning stage, the LLM model is given maximum flexibility to explore the repository while being restricted to read only access, limited tool call and limited iteration. |)
+Core architecture principles:
 
+1. **Plan before code**
+   - The agent first converts raw specs into detailed requirements.
+   - It explores the repository with restricted tools (`list_directory`, `read_file`) to gather grounded context.
+   - It produces a structured plan (`repo_context`, `design`, `approach`, `task`) before implementation starts.
 
-## Workflow
-1. Parse product specification, convert into detailed specification.
-2. Get context from current repo. Decide the approach that suits the current repo. Define the tasks required based on the approach.
-3. Review the product specification, check design, approach and tasks to make sure that they are coherent. If not, re-run from step 2.
-4. Implement tasks (except test cases), ensure all tasks are done and type check passed before proceeding.
-5. Implement test cases, ensure type check passed before proceeding. 
-6. Run test cases. If there is any error, determine whether there is a bug in the code or test cases, then route back to step 5 or step 6. 
-7. Determine whether all tasks are done, and whether the test coverage is enough.
+2. **Self-review gate before implementation**
+   - A dedicated plan-review node acts as an evaluator ("LLM-as-judge").
+   - If the plan is weak or inconsistent, the graph routes back to planning.
+   - This loop reduces implementation drift caused by vague specs.
+
+3. **Implementation as a controlled subgraph**
+   - Coding is split into app implementation, test implementation, test execution, and review.
+   - The subgraph uses conditional routing to decide whether to keep coding, fix tests, or finish.
+   - This keeps each node focused on a single responsibility.
+
+4. **Quality gates and bounded retries**
+   - Each coding phase enforces `npm run typecheck`.
+   - Test execution is routed by failure category (`test_only`, `app_logic`, `mixed_or_unclear`).
+   - Retry count is bounded (`RUN_TEST_FAILURE_LIMIT`) to prevent infinite loops.
+
+5. **Skill-augmented tool usage**
+   - The agent loads task-specific skills (explore/app/test) to keep outputs aligned with React + TypeScript best practices.
+   - Shell execution is restricted to a small allowed command set for safety and reproducibility.
+
+6. **Post-run structured validation**
+   - After coding nodes, a structured summarization step extracts:
+     - implementation summary
+     - files touched
+     - final typecheck status
+   - This creates clean state handoff between nodes and supports reliable final review.
+
+In short: the architecture combines **ReAct-style exploration/coding**, **evaluator-optimizer loops**, and **policy-based routing** to improve correctness, reduce hallucination, and keep execution governed.
 
 ## Optimization Techniques Applied
 
