@@ -14,27 +14,7 @@ python run_local.py --spec-file spec.txt
 ```
 
 ### Alternative: Run in LangSmith
-LangSmith provides an interactive UI to visualize the agent, to monitor its activity at real time, and understand token usage at every node. However, it requires a `LANGSMITH_API_KEY`, you can sign up [here](https://docs.langchain.com/langsmith/create-account-api-key#create-an-account-and-api-key).
-```bash
-langgraph dev
-```
-
-### Rollback changes in boilerplate
-This bash script with the option `--clean-untracked` will roll back all changes and remove node_modules folder
-```bash
-./scripts/rollback_frontend.sh --clean-untracked
-```
-
-## Design
-For this take home challenge, I took the concept of a very popular spec-driven framework that I really like to use when coding with Cursor. I took the concept of **design.md**, **approach.md** and **task.md**, which are useful in minimizing hallucinations of LLMs and ensure that LLMs stay coherent the whole time.
-
-In terms of choice of LLM, I chose gpt-5.4-mini for coding tasks and gpt-4o-mini for all other tasks in this project because coding tasks generally require more reasoning and larger context window. I also didn't choose the most powerful models that specialized in coding such as gpt-5.3-codex, claude-opus-4-6 and claude-sonnet-4-6, because I want to showcase that with the right workflow and agentic patterns, coupled with good context management and prompt engineering, even small models are capable of agentic coding. GPT-5.4-mini offers a perfect tradeoff between cost and performance.
-I used LangChain and LangGraph because LangGraph offers a sweet middle-ground between control and flexibility, while LangChain offers the ability to quickly switch between LLM models and prebuilt agent patterns. I also find LangSmith very useful in debugging and optimization due to its tracing capability.
-
-// TODO
-mention choice of LLM, choice of agent architecture, choice of temperature
-
-## Architecture
+.
 **Multi-stage self-validation**, **LLM-as-judge**, **skills pattern** and **tool use** throughout the whole workflow allows this agent to produce high-quality code without sacrificing governance and flexibility.
 ![Main graph](./static/main_graph.png)
 The main graph uses a **ReAct pattern** in the planning stage to make sure the agent gets enough context from the frontend repository with available tools. It also uses an **evaluator-optimizer pattern** to validate the plan.
