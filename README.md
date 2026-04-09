@@ -49,10 +49,27 @@ macOS/Linux (bash):
 For this take home challenge, I took inspiration of [OpenSpec](https://github.com/Fission-AI/OpenSpec), a very popular spec-driven framework that I really like to use when coding with Cursor. I took the concepts of **design.md**, **approach.md** and **task.md** from this framework, which are useful in minimizing hallucinations of LLMs and ensure that LLMs stay coherent the whole time.
 
 ## Architecture
-|                | Graph                                            | Description                                                                                                                                                                                                                                                                                                                                                                                                                |
-|:---------------|:-------------------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Main Graph     | <img src="./static/main_graph.png" height="30%"> | The main graph uses a **ReAct pattern** in the planning stage to make sure the agent gets enough context from the frontend repository with available tools. It also uses an **evaluator-optimizer pattern** to validate the plan.                                                                                                                                                                                          |
-| Implementation | <img src="./static/subgraph_2.png" height="50%"> | Inside the implementation stage, both implement_app and implement_test use the **ReAct pattern** and has its **own evaluator** to make sure all requirements are met before moving on to the next stage. On test errors, run_test node routes to implement_app or fix_test_cases based on the error type. review_implementation ensures all tasks are done and the test coverage is enough before completing the workflow. |
+<table width="100%">
+  <thead>
+    <tr>
+      <th></th>
+      <th width="40%">Graph</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Main Graph</td>
+      <td width="40%"><img src="./static/main_graph.png"/></td>
+      <td>The main graph uses a **ReAct pattern** in the planning stage to make sure the agent gets enough context from the frontend repository with available tools. It also uses an **evaluator-optimizer pattern** to validate the plan.</td>
+    </tr>
+    <tr>
+      <td>Implementation</td>
+      <td width="40%"><img src="./static/subgraph_2.png"/></td>
+      <td>Inside the implementation stage, both implement_app and implement_test use the **ReAct pattern** and has its **own evaluator** to make sure all requirements are met before moving on to the next stage. On test errors, run_test node routes to implement_app or fix_test_cases based on the error type. review_implementation ensures all tasks are done and the test coverage is enough before completing the workflow.</td>
+    </tr>
+  </tbody>
+</table>
 
 This agent is designed as a **multi-stage LangGraph workflow** that separates planning, implementation, testing, and review.  
 The main goal is to keep generation quality high while staying deterministic enough for repeated runs.
