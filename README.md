@@ -20,8 +20,9 @@ langgraph dev
 ```
 
 ### Rollback changes in boilerplate
+This bash script with the option `--clean-untracked` will roll back all changes and remove node_modules folder
 ```bash
-./scripts/rollback_frontend.sh --clean-untracked --yes
+./scripts/rollback_frontend.sh --clean-untracked
 ```
 
 ## Design

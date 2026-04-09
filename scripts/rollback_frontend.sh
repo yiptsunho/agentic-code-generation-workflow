@@ -5,6 +5,7 @@ set -euo pipefail
 usage() {
   echo "Usage: $0 [--clean-untracked] [--yes]" >&2
   echo "  Discards local changes under frontend/ to match HEAD (staged + unstaged)." >&2
+  echo "  Always removes frontend/node_modules/ if present." >&2
   echo "  --clean-untracked  also remove untracked files and directories under frontend/" >&2
   echo "  --yes              skip confirmation for --clean-untracked" >&2
 }
@@ -36,6 +37,13 @@ fi
 
 echo "Restoring tracked files under frontend/ to HEAD..."
 git restore --source=HEAD --staged --worktree frontend
+
+REMOVED_NODE_MODULES=0
+if [[ -d frontend/node_modules ]]; then
+  echo "Removing frontend/node_modules/ ..."
+  rm -rf frontend/node_modules
+  REMOVED_NODE_MODULES=1
+fi
 
 if [[ "$CLEAN_UNTRACKED" -eq 1 ]]; then
   echo
