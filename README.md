@@ -1,12 +1,13 @@
 ## Table of Contents
 * [How to run](#how-to-run)
 * [Stack](#stack)
-* [Design](#design)
+* [Design Inspiration](#design-inspiration)
 * [Architecture](#architecture)
-* [Workflow](#workflow)
 * [Optimization Techniques Applied](#optimization-techniques-applied)
 * [Tradeoff](#tradeoff)
 * [Changes made to boilerplate](#changes-made-to-boilerplate)
+* [What worked well and what I would improve](#what-worked-well-and-what-i-would-improve)
+* [Average cost per run](#average-cost-per-run)
 
 ## How to run
 
