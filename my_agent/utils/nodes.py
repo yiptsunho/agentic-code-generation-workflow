@@ -105,7 +105,11 @@ IMPLEMENT_REPO_CONTEXT_MAX_CHARS = 1800
 IMPLEMENT_DESIGN_MAX_CHARS = 1800
 IMPLEMENT_APPROACH_MAX_CHARS = 1800
 IMPLEMENT_TEST_OUTPUT_MAX_CHARS = 3500
-TEST_FAILURE_SKIP_THRESHOLD = 4
+RUN_TEST_FAILURE_LIMIT = 3
+
+FIX_TEST_RUN_TOOL_LIMIT = 120
+FIX_TEST_MODEL_CALL_LIMIT = 120
+FIX_TEST_RECURSION_LIMIT = 280
 
 implement_system_prompt = """Implement frontend tasks with high signal and minimal turns.
 
@@ -119,7 +123,6 @@ Core constraints:
 
 Tool usage:
 - Batch same-kind tool calls in one turn whenever possible (group `list_directory`, then grouped reads, then grouped writes).
-- Prefer `file_search` and targeted reads over repeatedly listing directories.
 - Avoid re-reading the same file unless you have edited it or need specific unseen lines.
 - If multiple files need edits, complete them in one pass before validation.
 - Do not call `list_directory` (or other file-browsing tools) on `node_modules` or any path under it.
@@ -146,6 +149,20 @@ Do not stop with a failure report only. Finish with one assistant message (no to
 - dev sanity check
 - remaining risks/blockers (if any).
 """
+
+fix_test_system_prompt = (
+    implement_system_prompt
+    + """
+
+Test repair phase (complete the full fix loop inside this agent — do not stop after a single test run):
+- After `npm run typecheck` is clean, run `run_frontend_npm("npm run test")` (or the project test script).
+- On failures: use paths and stack traces from the output; open implicated files with `read_file`.
+- Re-run `npm run test` after substantive edits; repeat edit → test until tests pass (`exit_code` 0 / vitest success).
+- Prefer targeted reads; avoid `list_directory` on the repo root unless you need a path you do not have.
+- If a failure points at app code, apply the smallest change that unblocks tests.
+- End only when typecheck is clean and the last `npm run test` succeeded, or you document a hard blocker with the last failing output.
+"""
+)
 
 split_task_system_prompt = """Split implementation checklist items into app tasks and test tasks.
 
@@ -374,7 +391,7 @@ def should_finish_implementation(state: CodeAgentState):
 
 implement_tool_kit = FileManagementToolkit(
     root_dir=str(Path(".").resolve()),
-    selected_tools=["copy_file", "file_search", "move_file", "write_file", "read_file", "list_directory"],
+    selected_tools=["copy_file", "write_file", "read_file", "list_directory"],
 ).get_tools()
 
 implement_middleware = [
@@ -404,6 +421,25 @@ repo_coder_tests = create_agent(
     system_prompt=implement_system_prompt,
     middleware=implement_middleware,
 )
+
+fix_test_middleware = [
+    ToolCallLimitMiddleware(
+        run_limit=FIX_TEST_RUN_TOOL_LIMIT,
+        exit_behavior="continue",
+    ),
+    ModelCallLimitMiddleware(
+        run_limit=FIX_TEST_MODEL_CALL_LIMIT,
+        exit_behavior="end",
+    ),
+]
+
+repo_coder_fix_tests = create_agent(
+    model="gpt-5.4-mini",
+    tools=implement_test_tools,
+    system_prompt=fix_test_system_prompt,
+    middleware=fix_test_middleware,
+)
+
 
 def _truncate_text(text: str, *, max_chars: int) -> str:
     value = (text or "").strip()
@@ -526,7 +562,7 @@ def implement_tests(state: CodeAgentState):
     test_output = (state.get("test_output") or "").strip()
     test_passed = state.get("test_passed")
     test_failure_category = (state.get("test_failure_category") or "").strip()
-    test_failure_repeat_count = state.get("test_failure_repeat_count", 0)
+    run_test_failure_count = int(state.get("run_test_failure_count") or 0)
 
     spec_for_phase = _truncate_text(
         detailed_specifications,
@@ -556,7 +592,7 @@ def implement_tests(state: CodeAgentState):
         "Before writing or editing any test files, call `load_test_skills` to load the relevant testing skill guidance.\n"
         "Use the existing `src/__tests__` directory for test files in this repo; do not create a new `tests` folder or alternate test directory.\n"
         "Native form validation warning: required/input constraints may block submit handlers, so custom alert/error UI may not appear from a submit-click path.\n"
-        "Convergence policy: if test output is unchanged across consecutive failed runs (see repeat_count), first write a short root-cause analysis "
+        "If run_test has failed multiple times already (see run_test_failure_count), write a short root-cause analysis "
         "(what failed, why previous fix did not work, and what different strategy you will try), then edit.\n"
         "Do not repeat the same micro-fix pattern; use a materially different approach for that file.\n"
         "Use only test-related tasks from the checklist below. "
@@ -582,7 +618,7 @@ def implement_tests(state: CodeAgentState):
             "\n\nLatest test run context from previous iteration:\n\n"
             f"- test_passed: {test_passed}\n"
             f"- test_failure_category: {test_failure_category or 'mixed_or_unclear'}\n\n"
-            f"- test_failure_repeat_count: {test_failure_repeat_count}\n\n"
+            f"- run_test_failure_count: {run_test_failure_count}\n\n"
             "Use this to target fixes before re-running checks.\n\n"
             "Raw test output:\n\n"
             f"{_truncate_text(test_output, max_chars=IMPLEMENT_TEST_OUTPUT_MAX_CHARS)}"
@@ -640,14 +676,14 @@ def implement_tests(state: CodeAgentState):
 
 
 def fix_test_cases(state: CodeAgentState):
-    """Repair tests after `run_test` failures — focused prompt, then re-run tests from graph edge."""
+    """Repair tests after `run_test` failures — agent runs typecheck + tests in a loop, then we sync state."""
     detailed_specifications = state["detailed_specifications"]
     test_task = state.get("test_task") or state.get("task") or []
     feedback_of_test_case = (state.get("feedback_of_test_case") or "").strip()
     test_output = (state.get("test_output") or "").strip()
     test_passed = state.get("test_passed")
     test_failure_category = (state.get("test_failure_category") or "").strip()
-    test_failure_repeat_count = state.get("test_failure_repeat_count", 0)
+    run_test_failure_count = int(state.get("run_test_failure_count") or 0)
 
     spec_for_phase = _truncate_text(
         detailed_specifications,
@@ -655,13 +691,14 @@ def fix_test_cases(state: CodeAgentState):
     )
 
     user_parts: list[str] = [
-        "Fix failing frontend tests based on the latest test run output.\n\n",
+        "Fix failing frontend tests. You may run `npm run test` and `npm run typecheck` as many times as needed "
+        "via `run_frontend_npm` until both are clean; stay in one session — do not assume another node will re-run tests.\n\n",
         "Phase: test repair only (do not change application feature code except types/imports strictly required for tests).\n\n",
-        "**Quality gate:** Run `npm install` then `npm run typecheck` via `run_frontend_npm` until clean.\n\n",
+        "**Quality gate:** Run `npm install` then keep `npm run typecheck` and `npm run test` green via `run_frontend_npm`.\n\n",
         "Before editing, call `load_test_skills`.\n"
         "Use only `src/__tests__` for test files; do not add a separate `tests` folder.\n"
         "Native `required` fields may block submit — align assertions with native vs component validation.\n"
-        "If repeat_count indicates unchanged failures, write a short root-cause analysis before a different fix strategy.\n\n",
+        "If run_test_failure_count is high, write a short root-cause analysis before a different fix strategy.\n\n",
         "Detailed specifications (context):\n\n",
         spec_for_phase,
         "\n\nRelevant test checklist (from plan split):\n\n",
@@ -673,17 +710,17 @@ def fix_test_cases(state: CodeAgentState):
             f"{feedback_of_test_case}"
         )
     user_parts.append(
-        "\n\nLatest automated test run (primary signal):\n\n"
+        "\n\nLatest automated test run before this session (for context):\n\n"
         f"- test_passed: {test_passed}\n"
         f"- test_failure_category: {test_failure_category or 'mixed_or_unclear'}\n"
-        f"- test_failure_repeat_count: {test_failure_repeat_count}\n\n"
+        f"- run_test_failure_count: {run_test_failure_count}\n\n"
         "Raw output:\n\n"
         f"{_truncate_text(test_output, max_chars=IMPLEMENT_TEST_OUTPUT_MAX_CHARS)}"
     )
 
-    coding = repo_coder_tests.invoke(
+    coding = repo_coder_fix_tests.invoke(
         {"messages": [HumanMessage(content="".join(user_parts))]},
-        config={"recursion_limit": IMPLEMENT_RECURSION_LIMIT},
+        config={"recursion_limit": FIX_TEST_RECURSION_LIMIT},
     )
     transcript = _format_exploration_transcript(
         coding["messages"],
@@ -701,13 +738,13 @@ def fix_test_cases(state: CodeAgentState):
                     "2) files_touched: relative file paths created/modified (infer from tool messages). "
                     "Use [] only if no file changes occurred.\n"
                     "3) validation_summary: npm self-check interpretation focused on ToolMessage content "
-                    "from `run_frontend_npm`.\n"
+                    "from `run_frontend_npm` (cover `npm run typecheck` and `npm run test` / vitest).\n"
                     "4) typecheck_passed_final: determine from the LAST `npm run typecheck` result in transcript; "
                     "true only if exit_code is 0 (or output clearly indicates success with no TS errors).\n\n"
                     "Validation requirements:\n"
-                    "- Cover npm install, npm run typecheck (final state), and npm run dev if present.\n"
-                    "- If the last typecheck still failed, explicitly say the run did NOT finish clean and list "
-                    "remaining diagnostics.\n"
+                    "- Cover npm install, npm run typecheck (final state), npm run test / vitest (final state), "
+                    "and npm run dev if present.\n"
+                    "- If the last typecheck or test run still failed, explicitly say so and list remaining diagnostics.\n"
                     "- Treat npm run dev timeout/exit_code -1 as expected for Vite when startup looks healthy.\n"
                     "- If npm tools are absent, say so."
                 )
@@ -724,17 +761,19 @@ def fix_test_cases(state: CodeAgentState):
         ]
     )
 
-    return {
+    updates = {
         "implementation_summary": post_run_response.summary,
         "implementation_files": post_run_response.files_touched,
         "implementation_validation": post_run_response.validation_summary,
         "implementation_typecheck_passed": post_run_response.typecheck_passed_final,
     }
+    merged = {**state, **updates}
+    test_updates = run_test(merged)
+    return {**updates, **test_updates}
 
 
 def run_test(state: CodeAgentState):
-    prev_test_output = (state.get("test_output") or "").strip()
-    prev_repeat_count = int(state.get("test_failure_repeat_count") or 0)
+    prev_failure_count = int(state.get("run_test_failure_count") or 0)
 
     report_path = FRONTEND_ROOT / ".tmp" / "vitest.json"
     try:
@@ -757,12 +796,12 @@ def run_test(state: CodeAgentState):
     if report_output:
         passed = "success: True" in report_output or "failed=0" in report_output
     category = "passed"
-    repeat_count = 0
+    failure_count = 0
     errors_skipped = False
-    unresolved_summary = ""
 
     if passed:
-        repeat_count = 0
+        failure_count = 0
+        errors_skipped = False
     else:
         routing_llm = llm.with_structured_output(TestFailureRoutingResponse)
         routing = routing_llm.invoke(
@@ -782,27 +821,15 @@ def run_test(state: CodeAgentState):
             ]
         )
         category = routing.category
-        current = compact_output.strip()
-        if prev_test_output and current == prev_test_output:
-            repeat_count = prev_repeat_count + 1
-        else:
-            repeat_count = 1
-        if repeat_count >= TEST_FAILURE_SKIP_THRESHOLD:
-            errors_skipped = True
-            unresolved_summary = (
-                "Skipped repeated test failure after convergence threshold.\n"
-                f"- repeat_count: {repeat_count}\n"
-                f"- category: {category}\n"
-                "- note: test output matched the previous failed run's output."
-            )
+        failure_count = prev_failure_count + 1
+        errors_skipped = failure_count >= RUN_TEST_FAILURE_LIMIT
 
     return {
         "test_output": compact_output,
         "test_passed": passed,
         "test_failure_category": category,
-        "test_failure_repeat_count": repeat_count,
+        "run_test_failure_count": failure_count,
         "test_errors_skipped": errors_skipped,
-        "unresolved_test_errors": unresolved_summary,
     }
 
 
@@ -810,13 +837,11 @@ def should_route_after_test(state: CodeAgentState):
     if state.get("test_passed", False):
         return "review_implementation"
 
-    if state.get("test_errors_skipped", False):
+    failure_count = int(state.get("run_test_failure_count") or 0)
+    if failure_count >= RUN_TEST_FAILURE_LIMIT:
         return "review_implementation"
 
     category = state.get("test_failure_category", "mixed_or_unclear")
-    repeat_count = state.get("test_failure_repeat_count", 0)
-    if repeat_count >= 2:
-        return "fix_test_cases"
     if category == "test_only":
         return "fix_test_cases"
 
@@ -837,8 +862,8 @@ def review_implementation(state: CodeAgentState):
     test_output = state.get("test_output", "")
     test_passed = state.get("test_passed", False)
     test_failure_category = state.get("test_failure_category", "mixed_or_unclear")
-    test_errors_skipped = state.get("test_errors_skipped", False)
-    unresolved_test_errors = state.get("unresolved_test_errors", "")
+    run_test_failure_count = int(state.get("run_test_failure_count") or 0)
+    test_errors_skipped = bool(state.get("test_errors_skipped", False))
 
     review_llm = llm.with_structured_output(ReviewImplementationResponse)
     response = review_llm.invoke(
@@ -859,7 +884,9 @@ def review_implementation(state: CodeAgentState):
                     "- implement_tests: add or expand tests/coverage from scratch.\n"
                     "- fix_test_cases: failing tests need targeted repair (assertions, mocks, setup).\n"
                     "- run_test: implementation is done but tests need a rerun to verify.\n"
-                    "- If `test_errors_skipped` is true, treat unresolved_test_errors as a blocking risk and avoid passing review unless explicitly acceptable.\n"
+                    f"- If test_errors_skipped is true, run_test hit the failure limit ({RUN_TEST_FAILURE_LIMIT}); "
+                    "the workflow will not return to implement_tests or fix_test_cases from this review — prefer "
+                    "route end; use implement_app only if app code must change.\n"
                     "Prefer a single most useful next step."
                 )
             ),
@@ -878,9 +905,9 @@ def review_implementation(state: CodeAgentState):
                     "Implementation validation:\n"
                     f"{implementation_validation}\n\n"
                     f"Latest test_passed: {test_passed}\n"
-                    f"Latest test_failure_category: {test_failure_category}\n\n"
-                    f"Latest test_errors_skipped: {test_errors_skipped}\n"
-                    f"Unresolved test errors:\n{unresolved_test_errors or '(none)'}\n\n"
+                    f"Latest test_failure_category: {test_failure_category}\n"
+                    f"Latest run_test_failure_count: {run_test_failure_count}\n"
+                    f"test_errors_skipped (failure limit reached): {test_errors_skipped}\n\n"
                     "Latest test output:\n"
                     f"{test_output}"
                 )
@@ -905,6 +932,12 @@ def should_route_after_review_implementation(state: CodeAgentState):
     route = state.get("review_implementation_route", "implement_app")
     feedback_of_code = (state.get("feedback_of_code") or "").strip()
     feedback_of_test_case = (state.get("feedback_of_test_case") or "").strip()
+
+    if state.get("test_errors_skipped", False) and route in {
+        "implement_tests",
+        "fix_test_cases",
+    }:
+        return END
 
     # Deterministic guard rails: if review did not pass and feedback exists,
     # force implementation loops instead of re-running tests immediately.
