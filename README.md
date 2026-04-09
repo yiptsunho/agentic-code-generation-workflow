@@ -6,7 +6,10 @@
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+
 uv sync
+# or
+pip install -r requirements.txt
 ```
 ### Run locally
 ```bash
@@ -25,11 +28,15 @@ This bash script with the option `--clean-untracked` will roll back all changes 
 ./scripts/rollback_frontend.sh --clean-untracked
 ```
 
-## Design
-For this take home challenge, I took the concept of a very popular spec-driven framework that I really like to use when coding with Cursor. I took the concept of **design.md**, **approach.md** and **task.md**, which are useful in minimizing hallucinations of LLMs and ensure that LLMs stay coherent the whole time.
+## Stack
+| Stack             | Choice                                                             | Remarks                                                                                                                                                                                                                                                                                                                                                                                    |
+|:------------------|:-------------------------------------------------------------------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| LLM               | gpt-4o-mini & gpt-5.4-mini                                         | I didn't choose the most powerful coding-specialized models such as gpt-5.3-codex, claude-opus-4-6 and claude-sonnet-4-6, because I want to showcase that with the right workflow and agentic patterns, coupled with good context management and prompt engineering, even small models are capable of agentic coding. GPT-5.4-mini offers a perfect tradeoff between cost and performance. |
+| Agentic framework | LangChain & LangGraph                                              | LangGraph offers a sweet middle-ground between control and flexibility, while LangChain offers the ability to quickly switch between LLM models and prebuilt agent patterns. I also find LangSmith very useful in debugging and optimization due to its tracing capability.                                                                                                                |
+| Tooling           | skills, limited file system operations and limited shell execution | Limited file system operations and limited shell execution within the boilerplate for security reasons. Skills are provided to LLM to maintain best practices of React 19, Typescript, MUI, etc.                                                                                                                                                                                           |
 
-In terms of choice of LLM, I chose gpt-5.4-mini for coding tasks and gpt-4o-mini for all other tasks in this project because coding tasks generally require more reasoning and larger context window. I also didn't choose the most powerful models that specialized in coding such as gpt-5.3-codex, claude-opus-4-6 and claude-sonnet-4-6, because I want to showcase that with the right workflow and agentic patterns, coupled with good context management and prompt engineering, even small models are capable of agentic coding. GPT-5.4-mini offers a perfect tradeoff between cost and performance.
-I used LangChain and LangGraph because LangGraph offers a sweet middle-ground between control and flexibility, while LangChain offers the ability to quickly switch between LLM models and prebuilt agent patterns. I also find LangSmith very useful in debugging and optimization due to its tracing capability.
+## Design
+For this take home challenge, I took inspiration of [OpenSpec](https://github.com/Fission-AI/OpenSpec), a very popular spec-driven framework that I really like to use when coding with Cursor. I took the concepts of **design.md**, **approach.md** and **task.md** from this framework, which are useful in minimizing hallucinations of LLMs and ensure that LLMs stay coherent the whole time.
 
 ## Architecture
 **Multi-stage self-validation**, **LLM-as-judge**, **skills pattern** and **tool use** throughout the whole workflow allows this agent to produce high-quality code without sacrificing governance and flexibility.
@@ -88,11 +95,11 @@ The following optimizations were implemented to improve token efficiency, latenc
 
 - The latest full run is approximately **267.6K tokens**, with optimization focused on the highest-cost area (`implement_*`) while keeping behavior stable.
 
-## Changes made to the boilerplate config
-In order to better parse the vitest results into LLM, I changed the test command from `vitest run` to `vitest run --reporter=json --outputFile=.tmp/vitest.json`. It significantly reduces the context while increasing readability because it has a predictable format.
-
 ## Tradeoff
-1. We can definitely use a more powerful model for this project to speed up each execution, such as gpt-5.3-codex, claude-opus-4-6 and claude-sonnet-4-6. Using mini models in 
+1. We can definitely use a more powerful model for this project to speed up each run, such as gpt-5.3-codex, claude-opus-4-6 and claude-sonnet-4-6. I used gpt-5.4-mini and gpt-4o-mini because of cost optimization.
 2. The workflow design may seem a little bit too much for this project. However, I try to mimic real-life situation with this workflow, like addressing vague product specifications, dealing with complex codebases, and upholding high quality standard.
 3. I introduced the best practices of React 19, Typescript, Vite, Apollo Client, GraphQL and vitest to LLMs through skills, therefore this agent may use more time and tokens compared to others. It may not make a huge difference in code quality in this project, but introducing these best practices to LLMs is key in real-life situations.
-4. For this project, I did not introduce human-in-the-loop because 
+4. For demo purpose, I did not introduce human-in-the-loop in this agent because I don't want to confuse the reviewers with a really complex workflow. But in reality, human-in-the-loop is definitely required, especially before the actual implementation. 
+
+## Changes made to the boilerplate config
+In order to better parse the vitest results into LLM, I changed the test command from `vitest run` to `vitest run --reporter=json --outputFile=.tmp/vitest.json`. It significantly reduces the context while increasing readability because it has a predictable format.
