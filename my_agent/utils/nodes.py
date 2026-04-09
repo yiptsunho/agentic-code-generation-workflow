@@ -1,3 +1,5 @@
+"""Core LangGraph nodes for planning, implementation, test repair, and routing."""
+
 from pathlib import Path
 from typing import Sequence
 
@@ -30,9 +32,10 @@ from my_agent.utils.state import (
 from my_agent.utils.tools import (
     FRONTEND_ROOT,
     load_app_skills,
+    load_explore_repo_skills,
     load_test_skills,
     read_vitest_report_output,
-    run_frontend_npm, load_explore_repo_skills,
+    run_frontend_npm,
 )
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
@@ -175,7 +178,7 @@ Rules:
 """
 
 def parse_specifications(state: CodeAgentState):
-
+    """Convert raw user specs into a detailed implementation-ready specification."""
     raw_specifications = state["raw_specifications"]
     structured_llm = llm.with_structured_output(DetailedSpecifications)
     response = structured_llm.invoke([
@@ -241,6 +244,7 @@ def _format_task_list(task: list[str]) -> str:
 
 
 def plan(state: CodeAgentState):
+    """Explore the repository and produce a structured implementation plan."""
     detailed_specifications = state["detailed_specifications"]
     feedback_of_plan = (state.get("feedback_of_plan") or "").strip()
     revising = bool(feedback_of_plan)
@@ -300,6 +304,7 @@ def plan(state: CodeAgentState):
     }
 
 def review_plan(state: CodeAgentState):
+    """Review the generated plan and return approval plus actionable feedback."""
     detailed_specifications = state["detailed_specifications"]
     repo_context = state.get("repo_context") or ""
     design = state.get("design") or ""
@@ -343,6 +348,7 @@ def review_plan(state: CodeAgentState):
 
 
 def split_task(state: CodeAgentState):
+    """Split checklist items into app tasks and test tasks."""
     task = state.get("task") or []
     detailed_specifications = state.get("detailed_specifications", "")
 
@@ -370,6 +376,7 @@ def split_task(state: CodeAgentState):
 
 
 def should_start_implement(state: CodeAgentState):
+    """Route to implementation only when plan review approves the plan."""
     plan_approved = state["plan_approved"]
 
     if plan_approved:
@@ -379,12 +386,14 @@ def should_start_implement(state: CodeAgentState):
 
 
 def should_continue_to_tests(state: CodeAgentState):
+    """Stay in app implementation until typecheck passes, then move to tests."""
     if state.get("implementation_typecheck_passed", False):
         return "implement_tests"
     return "implement_app"
 
 
 def should_finish_implementation(state: CodeAgentState):
+    """Keep iterating test implementation until typecheck is clean."""
     if state.get("implementation_typecheck_passed", False):
         return "run_test"
     return "implement_tests"
@@ -442,6 +451,7 @@ repo_coder_fix_tests = create_agent(
 
 
 def _truncate_text(text: str, *, max_chars: int) -> str:
+    """Trim long prompt sections while preserving short, non-empty values."""
     value = (text or "").strip()
     if len(value) <= max_chars:
         return value or "(none)"
@@ -449,6 +459,7 @@ def _truncate_text(text: str, *, max_chars: int) -> str:
 
 
 def implement_app(state: CodeAgentState):
+    """Run the app-coding phase and summarize files and validation outcomes."""
     detailed_specifications = state["detailed_specifications"]
     repo_context = (state.get("repo_context") or "").strip()
     design = (state.get("design") or "").strip()
@@ -553,6 +564,7 @@ def implement_app(state: CodeAgentState):
 
 
 def implement_tests(state: CodeAgentState):
+    """Run the test-coding phase and summarize files and validation outcomes."""
     detailed_specifications = state["detailed_specifications"]
     repo_context = (state.get("repo_context") or "").strip()
     design = (state.get("design") or "").strip()
@@ -773,6 +785,7 @@ def fix_test_cases(state: CodeAgentState):
 
 
 def run_test(state: CodeAgentState):
+    """Execute tests, classify failures, and update retry/circuit-breaker state."""
     prev_failure_count = int(state.get("run_test_failure_count") or 0)
 
     report_path = FRONTEND_ROOT / ".tmp" / "vitest.json"
@@ -834,6 +847,7 @@ def run_test(state: CodeAgentState):
 
 
 def should_route_after_test(state: CodeAgentState):
+    """Choose the next node after a test run based on pass/failure category."""
     if state.get("test_passed", False):
         return "review_implementation"
 
@@ -852,12 +866,12 @@ def should_route_after_test(state: CodeAgentState):
 
 
 def review_implementation(state: CodeAgentState):
+    """Review end-to-end implementation quality and select the next workflow step."""
     detailed_specifications = state.get("detailed_specifications", "")
     design = state.get("design", "")
     approach = state.get("approach", "")
     task = state.get("task") or []
     implementation_summary = state.get("implementation_summary", "")
-    implementation_files = state.get("implementation_files") or []
     implementation_validation = state.get("implementation_validation", "")
     test_output = state.get("test_output", "")
     test_passed = state.get("test_passed", False)
@@ -928,6 +942,7 @@ def review_implementation(state: CodeAgentState):
     }
 
 def should_route_after_review_implementation(state: CodeAgentState):
+    """Apply deterministic routing guards on top of reviewer-selected route."""
     review_passed = state.get("review_implementation_passed", False)
     route = state.get("review_implementation_route", "implement_app")
     feedback_of_code = (state.get("feedback_of_code") or "").strip()
