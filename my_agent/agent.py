@@ -1,19 +1,23 @@
-from langgraph.constants import START, END
+"""Assemble and compile the LangGraph-based coding agent."""
+
+from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 
 from my_agent.utils.nodes import (
+    fix_test_cases,
     implement_app,
     implement_tests,
-    fix_test_cases,
-    plan,
     parse_specifications,
+    plan,
     review_implementation,
     review_plan,
-    split_task,
-    should_route_after_review_implementation,
+    run_test,
     should_continue_to_tests,
     should_finish_implementation,
-    should_start_implement, run_test, should_route_after_test,
+    should_route_after_review_implementation,
+    should_route_after_test,
+    should_start_implement,
+    split_task,
 )
 from my_agent.utils.state import CodeAgentState, ImplementationSubgraphState
 

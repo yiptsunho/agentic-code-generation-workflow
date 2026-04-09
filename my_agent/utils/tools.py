@@ -175,6 +175,7 @@ def run_frontend_npm(command: str) -> str:
     - npm install
     - npm run typecheck
     - npm run dev  (Vite is long-running; we stop after a short window and return startup output)
+    - npm run test
 
     The return value always includes exit_code and captured output so traces are never blank.
     """
