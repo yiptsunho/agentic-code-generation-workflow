@@ -96,24 +96,6 @@ Output (structured):
   - If plan_approved is true: a brief confirmation (2–4 sentences). Optional minor suggestions are fine; keep approval true unless something is truly blocking.
 """
 
-EXPLORE_RUN_TOOL_LIMIT = 12
-EXPLORE_MODEL_CALL_LIMIT = 22
-EXPLORER_RECURSION_LIMIT = 120
-
-IMPLEMENT_RUN_TOOL_LIMIT = 100
-IMPLEMENT_MODEL_CALL_LIMIT = 100
-IMPLEMENT_RECURSION_LIMIT = 220
-IMPLEMENT_SPEC_MAX_CHARS = 5000
-IMPLEMENT_REPO_CONTEXT_MAX_CHARS = 1800
-IMPLEMENT_DESIGN_MAX_CHARS = 1800
-IMPLEMENT_APPROACH_MAX_CHARS = 1800
-IMPLEMENT_TEST_OUTPUT_MAX_CHARS = 3500
-RUN_TEST_FAILURE_LIMIT = 3
-
-FIX_TEST_RUN_TOOL_LIMIT = 120
-FIX_TEST_MODEL_CALL_LIMIT = 120
-FIX_TEST_RECURSION_LIMIT = 280
-
 implement_system_prompt = """Implement frontend tasks with high signal and minimal turns.
 
 Core constraints:
@@ -177,6 +159,24 @@ Rules:
 - If a task mixes app and test work, prefer placing it in `app_task`.
 """
 
+EXPLORE_RUN_TOOL_LIMIT = 12
+EXPLORE_MODEL_CALL_LIMIT = 22
+EXPLORER_RECURSION_LIMIT = 120
+
+IMPLEMENT_RUN_TOOL_LIMIT = 100
+IMPLEMENT_MODEL_CALL_LIMIT = 100
+IMPLEMENT_RECURSION_LIMIT = 220
+IMPLEMENT_SPEC_MAX_CHARS = 5000
+IMPLEMENT_REPO_CONTEXT_MAX_CHARS = 1800
+IMPLEMENT_DESIGN_MAX_CHARS = 1800
+IMPLEMENT_APPROACH_MAX_CHARS = 1800
+IMPLEMENT_TEST_OUTPUT_MAX_CHARS = 3500
+RUN_TEST_FAILURE_LIMIT = 3
+
+FIX_TEST_RUN_TOOL_LIMIT = 120
+FIX_TEST_MODEL_CALL_LIMIT = 120
+FIX_TEST_RECURSION_LIMIT = 280
+
 def parse_specifications(state: CodeAgentState):
     """Convert raw user specs into a detailed implementation-ready specification."""
     raw_specifications = state["raw_specifications"]
@@ -211,37 +211,6 @@ repo_explorer = create_agent(
     system_prompt=explore_prompt,
     middleware=explorer_middleware,
 )
-
-
-def _format_exploration_transcript(
-    messages: Sequence[BaseMessage],
-    *,
-    tool_body_limit: int = 4000,
-) -> str:
-    """Compress agent message list into text for the final structured planner."""
-    parts: list[str] = []
-    for m in messages:
-        if isinstance(m, HumanMessage):
-            parts.append(f"User:\n{m.content}")
-        elif isinstance(m, AIMessage):
-            if m.tool_calls:
-                names = ", ".join(tc["name"] for tc in m.tool_calls)
-                parts.append(f"Assistant (requested tools): {names}")
-            if m.content:
-                parts.append(f"Assistant:\n{m.content}")
-        elif isinstance(m, ToolMessage):
-            body = m.content
-            if len(body) > tool_body_limit:
-                body = body[:tool_body_limit] + "\n... [truncated]"
-            parts.append(f"Tool {m.name}:\n{body}")
-    return "\n\n---\n\n".join(parts)
-
-
-def _format_task_list(task: list[str]) -> str:
-    if not task:
-        return "(none)"
-    return "\n".join(f"{i + 1}. {item}" for i, item in enumerate(task))
-
 
 def plan(state: CodeAgentState):
     """Explore the repository and produce a structured implementation plan."""
@@ -448,15 +417,6 @@ repo_coder_fix_tests = create_agent(
     system_prompt=fix_test_system_prompt,
     middleware=fix_test_middleware,
 )
-
-
-def _truncate_text(text: str, *, max_chars: int) -> str:
-    """Trim long prompt sections while preserving short, non-empty values."""
-    value = (text or "").strip()
-    if len(value) <= max_chars:
-        return value or "(none)"
-    return value[:max_chars] + "\n... [truncated]"
-
 
 def implement_app(state: CodeAgentState):
     """Run the app-coding phase and summarize files and validation outcomes."""
@@ -973,3 +933,42 @@ def should_route_after_review_implementation(state: CodeAgentState):
         return route
 
     return "implement_app"
+
+
+def _format_exploration_transcript(
+    messages: Sequence[BaseMessage],
+    *,
+    tool_body_limit: int = 4000,
+) -> str:
+    """Compress agent message list into text for the final structured planner."""
+    parts: list[str] = []
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            parts.append(f"User:\n{m.content}")
+        elif isinstance(m, AIMessage):
+            if m.tool_calls:
+                names = ", ".join(tc["name"] for tc in m.tool_calls)
+                parts.append(f"Assistant (requested tools): {names}")
+            if m.content:
+                parts.append(f"Assistant:\n{m.content}")
+        elif isinstance(m, ToolMessage):
+            body = m.content
+            if len(body) > tool_body_limit:
+                body = body[:tool_body_limit] + "\n... [truncated]"
+            parts.append(f"Tool {m.name}:\n{body}")
+    return "\n\n---\n\n".join(parts)
+
+
+def _format_task_list(task: list[str]) -> str:
+    """Format checklist items into a stable numbered list for prompts."""
+    if not task:
+        return "(none)"
+    return "\n".join(f"{i + 1}. {item}" for i, item in enumerate(task))
+
+
+def _truncate_text(text: str, *, max_chars: int) -> str:
+    """Trim long prompt sections while preserving short, non-empty values."""
+    value = (text or "").strip()
+    if len(value) <= max_chars:
+        return value or "(none)"
+    return value[:max_chars] + "\n... [truncated]"
