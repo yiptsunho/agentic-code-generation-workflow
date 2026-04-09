@@ -1,5 +1,29 @@
 # Agentic Code Generation Workflow
 
+## How to run
+
+### Setup
+```bash
+python -m venv .venv
+source .venv/bin/activate
+uv sync
+```
+### Run locally
+```bash
+python run_local.py --spec-file spec.txt
+```
+
+### Alternative: Run in LangSmith
+LangSmith provides an interactive UI to visualize the agent, to monitor its activity at real time, and understand token usage at every node. However, it requires a `LANGSMITH_API_KEY`, you can sign up [here](https://docs.langchain.com/langsmith/create-account-api-key#create-an-account-and-api-key).
+```bash
+langgraph dev
+```
+
+### Rollback changes in boilerplate
+```bash
+./scripts/rollback_frontend.sh --clean-untracked --yes
+```
+
 ## Design
 For this take home challenge, I took the concept of a very popular spec-driven framework that I really like to use when coding with Cursor. I took the concept of **design.md**, **approach.md** and **task.md**, which are useful in minimizing hallucinations of LLMs and ensure that LLMs stay coherent the whole time.
 
