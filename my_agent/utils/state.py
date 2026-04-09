@@ -26,9 +26,8 @@ class CodeAgentState(TypedDict):
     test_output: NotRequired[str]
     test_passed: NotRequired[bool]
     test_failure_category: NotRequired[str]
-    test_failure_repeat_count: NotRequired[int]
+    run_test_failure_count: NotRequired[int]
     test_errors_skipped: NotRequired[bool]
-    unresolved_test_errors: NotRequired[str]
     review_implementation_passed: NotRequired[bool]
     review_implementation_route: NotRequired[str]
 
@@ -50,9 +49,8 @@ class ImplementationSubgraphState(TypedDict):
     test_output: NotRequired[str]
     test_passed: NotRequired[bool]
     test_failure_category: NotRequired[str]
-    test_failure_repeat_count: NotRequired[int]
+    run_test_failure_count: NotRequired[int]
     test_errors_skipped: NotRequired[bool]
-    unresolved_test_errors: NotRequired[str]
     review_implementation_passed: NotRequired[bool]
     review_implementation_route: NotRequired[str]
 
