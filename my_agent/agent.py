@@ -1,4 +1,3 @@
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.constants import START, END
 from langgraph.graph import StateGraph
 
@@ -18,8 +17,6 @@ from my_agent.utils.nodes import (
 )
 from my_agent.utils.state import CodeAgentState, ImplementationSubgraphState
 
-memory = MemorySaver()
-
 ###############################
 ## subgraph (implementation) ##
 ###############################
@@ -32,7 +29,6 @@ implementation_subgraph.add_node("implement_tests", implement_tests)
 implementation_subgraph.add_node("fix_test_cases", fix_test_cases)
 implementation_subgraph.add_node("run_test", run_test)
 implementation_subgraph.add_node("review_implementation", review_implementation)
-
 
 # edges
 implementation_subgraph.add_edge(START, "split_task")
