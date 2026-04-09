@@ -171,3 +171,6 @@ In order to better parse the vitest results into LLM, I changed the test command
 3. Expand automated evaluation with benchmark tasks and trace-level metrics (first-pass success rate, retries per stage, token/latency per node) to quantify quality and cost tradeoffs.
 4. Introduce optional model-routing per stage (small model for parsing/routing, stronger model for hard coding turns) to further improve cost-performance efficiency.
 5. I ran into a rate limit once out of more than 150 runs, LangChain does have built-in support for model rate limits, however I didn't want to introduce breaking changes at last minute.
+
+## Average cost per run
+- Over the last 18 runs in LangSmith, this agent has an average token usage of 331.4k and an average cost of $0.102.
