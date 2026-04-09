@@ -1,4 +1,12 @@
-# Agentic Code Generation Workflow
+## Table of Contents
+* [How to run](#how-to-run)
+* [Stack](#stack)
+* [Design](#design)
+* [Architecture](#architecture)
+* [Workflow](#workflow)
+* [Optimization Techniques Applied](#optimization-techniques-applied)
+* [Tradeoff](#tradeoff)
+* [Changes made to boilerplate](#changes-made-to-boilerplate)
 
 ## How to run
 
@@ -101,5 +109,5 @@ The following optimizations were implemented to improve token efficiency, latenc
 3. I introduced the best practices of React 19, Typescript, Vite, Apollo Client, GraphQL and vitest to LLMs through skills, therefore this agent may use more time and tokens compared to others. It may not make a huge difference in code quality in this project, but introducing these best practices to LLMs is key in real-life situations.
 4. For demo purpose, I did not introduce human-in-the-loop in this agent because I don't want to confuse the reviewers with a really complex workflow. But in reality, human-in-the-loop is definitely required, especially before the actual implementation. 
 
-## Changes made to the boilerplate config
+## Changes made to boilerplate
 In order to better parse the vitest results into LLM, I changed the test command from `vitest run` to `vitest run --reporter=json --outputFile=.tmp/vitest.json`. It significantly reduces the context while increasing readability because it has a predictable format.
