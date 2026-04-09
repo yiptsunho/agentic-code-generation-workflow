@@ -61,12 +61,12 @@ For this take home challenge, I took inspiration of [OpenSpec](https://github.co
     <tr>
       <td>Main Graph</td>
       <td width="40%"><img src="./static/main_graph.png"/></td>
-      <td>The main graph uses a **ReAct pattern** in the planning stage to make sure the agent gets enough context from the frontend repository with available tools. It also uses an **evaluator-optimizer pattern** to validate the plan.</td>
+      <td>The main graph uses a <strong>ReAct pattern</strong> in the planning stage to make sure the agent gets enough context from the frontend repository with available tools. It also uses an <strong>evaluator-optimizer pattern</strong> to validate the plan.</td>
     </tr>
     <tr>
       <td>Implementation</td>
       <td width="40%"><img src="./static/subgraph_2.png"/></td>
-      <td>Inside the implementation stage, both implement_app and implement_test use the **ReAct pattern** and has its **own evaluator** to make sure all requirements are met before moving on to the next stage. On test errors, run_test node routes to implement_app or fix_test_cases based on the error type. review_implementation ensures all tasks are done and the test coverage is enough before completing the workflow.</td>
+      <td>Inside the implementation stage, both implement_app and implement_test use the <strong>ReAct pattern</strong> and has its <strong>own evaluator</strong> to make sure all requirements are met before moving on to the next stage. On test errors, run_test node routes to implement_app or fix_test_cases based on the error type. review_implementation ensures all tasks are done and the test coverage is enough before completing the workflow.</td>
     </tr>
   </tbody>
 </table>
